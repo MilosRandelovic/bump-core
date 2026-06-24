@@ -1,0 +1,10 @@
+{
+  "cSpell.diagnosticLevel": "Hint",
+  "cSpell.words": [
+    "pflag"
+  ],
+  "editor.tabSize": 2,
+  "files.eol": "\n",
+  "files.insertFinalNewline": true,
+  "files.trimTrailingWhitespace": true
+}
