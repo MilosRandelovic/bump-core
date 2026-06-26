@@ -1,6 +1,7 @@
 package updater
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -21,7 +22,7 @@ type checkResult struct {
 }
 
 // CheckOutdated checks which dependencies have newer versions available
-func CheckOutdated(dependencies []shared.Dependency, registryType shared.RegistryType, options shared.Options, workingDirectory string, progressCallback func(int, int), log shared.LogFunc) (*shared.CheckResult, error) {
+func CheckOutdated(ctx context.Context, dependencies []shared.Dependency, registryType shared.RegistryType, options shared.Options, workingDirectory string, progressCallback func(int, int), log shared.LogFunc) (*shared.CheckResult, error) {
 	// Validate options against the registry's rules before doing any work
 	if err := ValidateOptions(registryType, options); err != nil {
 		return nil, err
@@ -76,7 +77,7 @@ func CheckOutdated(dependencies []shared.Dependency, registryType shared.Registr
 			if progressCallback != nil {
 				progressCallback(i+1, len(fileDependencies))
 			}
-			checkSingleDependency(dependency, registryClient, options, cache, &result, log)
+			checkSingleDependency(ctx, dependency, registryClient, options, cache, &result, log)
 		}
 	}
 
@@ -98,7 +99,7 @@ func CheckOutdated(dependencies []shared.Dependency, registryType shared.Registr
 }
 
 // checkSingleDependency checks a single dependency for updates and appends results
-func checkSingleDependency(dependency shared.Dependency, registryClient shared.RegistryClient, options shared.Options, cache *shared.Cache, result *checkResult, log shared.LogFunc) {
+func checkSingleDependency(ctx context.Context, dependency shared.Dependency, registryClient shared.RegistryClient, options shared.Options, cache *shared.Cache, result *checkResult, log shared.LogFunc) {
 	// Skip complex dependencies (git, path, workspace, etc.)
 	if strings.HasPrefix(dependency.Version, "git:") || strings.HasPrefix(dependency.Version, "path:") || dependency.Version == "complex" || dependency.Version == "*" {
 		if log != nil {
@@ -123,7 +124,7 @@ func checkSingleDependency(dependency shared.Dependency, registryClient shared.R
 		return
 	}
 
-	absoluteLatest, constraintLatest, err := fetchLatestVersions(dependency, registryClient, options, cache)
+	absoluteLatest, constraintLatest, err := fetchLatestVersions(ctx, dependency, registryClient, options, cache)
 	if err != nil {
 		// If constraint error, use the absolute latest already returned for semver skipped
 		if errors.Is(err, shared.ErrNoVersionsSatisfyConstraint) && absoluteLatest != "" {
@@ -179,20 +180,20 @@ func checkSingleDependency(dependency shared.Dependency, registryClient shared.R
 }
 
 // fetchLatestVersions determines the appropriate strategy and fetches version info
-func fetchLatestVersions(dependency shared.Dependency, registryClient shared.RegistryClient, options shared.Options, cache *shared.Cache) (absoluteLatest, constraintLatest string, err error) {
+func fetchLatestVersions(ctx context.Context, dependency shared.Dependency, registryClient shared.RegistryClient, options shared.Options, cache *shared.Cache) (absoluteLatest, constraintLatest string, err error) {
 	// If semver flag is enabled and we have a prefixed version, get both versions in one call
 	if options.Semver && shared.HasSemanticPrefix(dependency.OriginalVersion) {
-		return registryClient.GetBothLatestVersions(dependency.Name, dependency.OriginalVersion, dependency.HostedURL, options, cache)
+		return registryClient.GetBothLatestVersions(ctx, dependency.Name, dependency.OriginalVersion, dependency.HostedURL, options, cache)
 	}
 
 	// Check if current version is pre-release to determine which method to use
 	currentSemver, parseErr := semver.NewVersion(dependency.Version)
 	if parseErr == nil && currentSemver.Prerelease() != "" {
-		return registryClient.GetBothLatestVersions(dependency.Name, dependency.OriginalVersion, dependency.HostedURL, options, cache)
+		return registryClient.GetBothLatestVersions(ctx, dependency.Name, dependency.OriginalVersion, dependency.HostedURL, options, cache)
 	}
 
 	// Use absolute latest version fetching for stable versions (non-semver cases)
-	latest, err := registryClient.GetLatestVersionFromRegistry(dependency.Name, dependency.HostedURL, options, cache)
+	latest, err := registryClient.GetLatestVersionFromRegistry(ctx, dependency.Name, dependency.HostedURL, options, cache)
 	if err != nil {
 		return "", "", err
 	}

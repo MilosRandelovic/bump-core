@@ -39,8 +39,8 @@ func NewCache() *Cache {
 		filePath: filePath,
 	}
 
-	// Auto-load entries on creation
-	cache.LoadEntries()
+	// Auto-load entries on creation; start empty on load error
+	_ = cache.LoadEntries()
 
 	return cache
 }
@@ -60,11 +60,10 @@ func (c *Cache) LoadEntries() error {
 
 	file, err := os.Open(c.filePath)
 	if err != nil {
-		// Only warn if it's not a "file not found" error (which is expected for new cache)
-		if !os.IsNotExist(err) {
+		if os.IsNotExist(err) {
 			return nil
 		}
-		return nil // treat as empty cache
+		return err
 	}
 	defer file.Close()
 

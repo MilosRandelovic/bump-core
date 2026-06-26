@@ -14,6 +14,10 @@ func UpdateDependenciesInFile(filePath string, outdated []OutdatedDependency, pa
 		return nil
 	}
 
+	info, err := os.Stat(filePath)
+	if err != nil {
+		return fmt.Errorf("failed to stat file: %w", err)
+	}
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to read file: %w", err)
@@ -52,7 +56,7 @@ func UpdateDependenciesInFile(filePath string, outdated []OutdatedDependency, pa
 
 	// Join lines back together and write to file
 	content := strings.Join(lines, "\n")
-	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(filePath, []byte(content), info.Mode()); err != nil {
 		return fmt.Errorf("failed to write file: %w", err)
 	}
 

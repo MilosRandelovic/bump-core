@@ -1,7 +1,7 @@
 package pub
 
 import (
-	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -36,7 +36,7 @@ func NewRegistryClient() *RegistryClient {
 }
 
 // GetLatestVersionFromRegistry fetches the latest version from a specific registry
-func (client *RegistryClient) GetLatestVersionFromRegistry(packageName, registryURL string, options shared.Options, cache *shared.Cache) (string, error) {
+func (client *RegistryClient) GetLatestVersionFromRegistry(ctx context.Context, packageName, registryURL string, options shared.Options, cache *shared.Cache) (string, error) {
 	targetRegistry, err := client.resolveRegistry(registryURL)
 	if err != nil {
 		return "", err
@@ -51,7 +51,7 @@ func (client *RegistryClient) GetLatestVersionFromRegistry(packageName, registry
 		}
 	}
 
-	body, err := client.fetchPackageInfo(packageName, targetRegistry, options)
+	body, err := client.fetchPackageInfo(ctx, packageName, targetRegistry, options)
 	if err != nil {
 		return "", err
 	}
@@ -79,7 +79,7 @@ func (client *RegistryClient) GetLatestVersionFromRegistry(packageName, registry
 }
 
 // GetBothLatestVersions fetches both the absolute latest version and the latest version satisfying a constraint
-func (client *RegistryClient) GetBothLatestVersions(packageName, constraint, registryURL string, options shared.Options, cache *shared.Cache) (string, string, error) {
+func (client *RegistryClient) GetBothLatestVersions(ctx context.Context, packageName, constraint, registryURL string, options shared.Options, cache *shared.Cache) (string, string, error) {
 	targetRegistry, err := client.resolveRegistry(registryURL)
 	if err != nil {
 		return "", "", err
@@ -94,7 +94,7 @@ func (client *RegistryClient) GetBothLatestVersions(packageName, constraint, reg
 		}
 	}
 
-	body, err := client.fetchPackageInfo(packageName, targetRegistry, options)
+	body, err := client.fetchPackageInfo(ctx, packageName, targetRegistry, options)
 	if err != nil {
 		return "", "", err
 	}
@@ -105,7 +105,7 @@ func (client *RegistryClient) GetBothLatestVersions(packageName, constraint, reg
 		} `json:"versions"`
 	}
 
-	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&packageInfo); err != nil {
+	if err := json.Unmarshal(body, &packageInfo); err != nil {
 		return "", "", fmt.Errorf("error decoding response: %w", err)
 	}
 
@@ -160,13 +160,13 @@ func (client *RegistryClient) resolveRegistry(registryURL string) (RegistryConfi
 }
 
 // fetchPackageInfo is a shared method to fetch package information from registries
-func (client *RegistryClient) fetchPackageInfo(packageName string, targetRegistry RegistryConfig, options shared.Options) ([]byte, error) {
+func (client *RegistryClient) fetchPackageInfo(ctx context.Context, packageName string, targetRegistry RegistryConfig, options shared.Options) ([]byte, error) {
 	url := fmt.Sprintf("%s/api/packages/%s", strings.TrimRight(targetRegistry.URL, "/"), packageName)
 
 	client.log("Checking pub package: %s (registry: %s)\n", packageName, targetRegistry.URL)
 
 	httpClient := &http.Client{Timeout: 10 * time.Second}
-	request, err := http.NewRequest("GET", url, nil)
+	request, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}

@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -67,14 +68,8 @@ func (s *Server) handleRequest(request *Request) {
 }
 
 func (s *Server) handleDetect(request *Request) {
-	raw, err := json.Marshal(request.Params)
-	if err != nil {
-		s.sendError(request.ID, fmt.Sprintf("invalid params: %v", err))
-		return
-	}
-
 	var params DetectParams
-	if err := json.Unmarshal(raw, &params); err != nil {
+	if err := json.Unmarshal(request.Params, &params); err != nil {
 		s.sendError(request.ID, fmt.Sprintf("invalid detect params: %v", err))
 		return
 	}
@@ -99,14 +94,8 @@ func (s *Server) handleDetect(request *Request) {
 }
 
 func (s *Server) handleCheck(request *Request) {
-	raw, err := json.Marshal(request.Params)
-	if err != nil {
-		s.sendError(request.ID, fmt.Sprintf("invalid params: %v", err))
-		return
-	}
-
 	var params CheckParams
-	if err := json.Unmarshal(raw, &params); err != nil {
+	if err := json.Unmarshal(request.Params, &params); err != nil {
 		s.sendError(request.ID, fmt.Sprintf("invalid check params: %v", err))
 		return
 	}
@@ -130,7 +119,7 @@ func (s *Server) handleCheck(request *Request) {
 		s.sendProgress(current, total)
 	}
 
-	checkResult, err := updater.CheckOutdated(dependencies, registryType, options, "", progressCallback, logFunc)
+	checkResult, err := updater.CheckOutdated(context.Background(), dependencies, registryType, options, "", progressCallback, logFunc)
 	if err != nil {
 		s.sendError(request.ID, fmt.Sprintf("check error: %v", err))
 		return
@@ -140,14 +129,8 @@ func (s *Server) handleCheck(request *Request) {
 }
 
 func (s *Server) handleUpdate(request *Request) {
-	raw, err := json.Marshal(request.Params)
-	if err != nil {
-		s.sendError(request.ID, fmt.Sprintf("invalid params: %v", err))
-		return
-	}
-
 	var params UpdateParams
-	if err := json.Unmarshal(raw, &params); err != nil {
+	if err := json.Unmarshal(request.Params, &params); err != nil {
 		s.sendError(request.ID, fmt.Sprintf("invalid update params: %v", err))
 		return
 	}

@@ -1,6 +1,7 @@
 package shared
 
 import (
+	"context"
 	"errors"
 	"fmt"
 )
@@ -162,7 +163,7 @@ type Updater interface {
 
 // RegistryClient interface defines the contract for fetching package information
 type RegistryClient interface {
-	GetLatestVersionFromRegistry(packageName, registryURL string, options Options, cache *Cache) (string, error)
-	GetBothLatestVersions(packageName, constraint, registryURL string, options Options, cache *Cache) (absoluteLatest, constraintLatest string, err error)
+	GetLatestVersionFromRegistry(ctx context.Context, packageName, registryURL string, options Options, cache *Cache) (string, error)
+	GetBothLatestVersions(ctx context.Context, packageName, constraint, registryURL string, options Options, cache *Cache) (absoluteLatest, constraintLatest string, err error)
 	GetRegistryType() RegistryType
 }

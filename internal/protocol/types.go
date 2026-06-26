@@ -1,12 +1,16 @@
 package protocol
 
-import "github.com/MilosRandelovic/bump-core/shared"
+import (
+	"encoding/json"
+
+	"github.com/MilosRandelovic/bump-core/shared"
+)
 
 // Request represents an incoming JSON-RPC-like request over stdin
 type Request struct {
-	Method string      `json:"method"`
-	ID     int         `json:"id"`
-	Params interface{} `json:"params,omitempty"`
+	Method string          `json:"method"`
+	ID     int             `json:"id"`
+	Params json.RawMessage `json:"params,omitempty"`
 }
 
 // Response represents a JSON response sent over stdout
@@ -175,10 +179,12 @@ func ToOutdatedDependencies(infos []OutdatedDependencyInfo) []shared.OutdatedDep
 		}
 		result = append(result, shared.OutdatedDependency{
 			BaseDependency: shared.BaseDependency{
-				Name:      info.Name,
-				Type:      dependencyType,
-				FilePath:  info.FilePath,
-				HostedURL: info.HostedURL,
+				Name:            info.Name,
+				OriginalVersion: info.OriginalVersion,
+				Type:            dependencyType,
+				FilePath:        info.FilePath,
+				HostedURL:       info.HostedURL,
+				LineNumber:      info.LineNumber,
 			},
 			CurrentVersion: info.CurrentVersion,
 			LatestVersion:  info.LatestVersion,

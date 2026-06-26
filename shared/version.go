@@ -12,14 +12,11 @@ import (
 // Version is the single source of truth for the bump version across all repos
 const Version = "2.0.0"
 
-var (
-	versionPrefixRegex        = regexp.MustCompile(`^[\^~>=<]+`)
-	versionPrefixCaptureRegex = regexp.MustCompile(`^([\^~>=<]+)`)
-)
+var versionPrefixCaptureRegex = regexp.MustCompile(`^([\^~>=<]+)`)
 
 // CleanVersion removes prefix characters (^, ~, >=, etc.) from version strings
 func CleanVersion(version string) string {
-	return versionPrefixRegex.ReplaceAllString(version, "")
+	return versionPrefixCaptureRegex.ReplaceAllString(version, "")
 }
 
 // HasSemanticPrefix checks if version has semantic versioning prefix

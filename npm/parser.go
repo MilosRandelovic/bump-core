@@ -35,21 +35,21 @@ func (parser *Parser) ParseDependencies(filePath string, options shared.Options)
 
 		if err := json.Unmarshal(data, &packageData); err != nil {
 			parser.log("Warning: could not parse package.json for workspaces detection (%s): %v\n", filePath, err)
-			return parser.parseFile(filePath, options)
+			return parser.parseFile(filePath, data, options)
 		}
 
 		workspacePatterns, err := extractWorkspacePatterns(packageData.Workspaces)
 		if err != nil {
 			parser.log("Warning: invalid workspaces format in %s: %v\n", filePath, err)
-			return parser.parseFile(filePath, options)
+			return parser.parseFile(filePath, data, options)
 		}
 
 		if len(workspacePatterns) > 0 {
-			return parser.parseWorkspaces(filePath, workspacePatterns, options)
+			return parser.parseWorkspaces(filePath, data, workspacePatterns, options)
 		}
 	}
 
-	return parser.parseFile(filePath, options)
+	return parser.parseFile(filePath, data, options)
 }
 
 func (parser *Parser) log(format string, args ...any) {
@@ -58,12 +58,7 @@ func (parser *Parser) log(format string, args ...any) {
 	}
 }
 
-func (parser *Parser) parseFile(filePath string, options shared.Options) ([]shared.Dependency, error) {
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read file: %w", err)
-	}
-
+func (parser *Parser) parseFile(filePath string, data []byte, options shared.Options) ([]shared.Dependency, error) {
 	// Parse line by line to track line numbers and extract dependencies
 	lines := strings.Split(string(data), "\n")
 	var dependencies []shared.Dependency
@@ -135,11 +130,11 @@ func (parser *Parser) parseFile(filePath string, options shared.Options) ([]shar
 	return dependencies, nil
 }
 
-func (parser *Parser) parseWorkspaces(rootPath string, patterns []string, options shared.Options) ([]shared.Dependency, error) {
+func (parser *Parser) parseWorkspaces(rootPath string, rootData []byte, patterns []string, options shared.Options) ([]shared.Dependency, error) {
 	rootDir := filepath.Dir(rootPath)
 	all := []shared.Dependency{}
 
-	root, err := parser.parseFile(rootPath, options)
+	root, err := parser.parseFile(rootPath, rootData, options)
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +161,10 @@ func (parser *Parser) parseWorkspaces(rootPath string, patterns []string, option
 			if info, err := os.Stat(match); err == nil && info.IsDir() {
 				packagePath := filepath.Join(match, "package.json")
 				if _, err := os.Stat(packagePath); err == nil {
-					if fileDependencies, err := parser.parseFile(packagePath, options); err == nil {
+					wsData, err := os.ReadFile(packagePath)
+					if err != nil {
+						parser.log("Warning: failed to read workspace package %s: %v\n", packagePath, err)
+					} else if fileDependencies, err := parser.parseFile(packagePath, wsData, options); err == nil {
 						all = append(all, fileDependencies...)
 					} else {
 						parser.log("Warning: failed to parse workspace package %s: %v\n", packagePath, err)
