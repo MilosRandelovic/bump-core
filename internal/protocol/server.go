@@ -54,6 +54,7 @@ func (s *Server) Run() error {
 	return s.reader.Err()
 }
 
+// handleRequest routes the request to the appropriate method handler.
 func (s *Server) handleRequest(request *Request) {
 	switch request.Method {
 	case "detect":
@@ -67,6 +68,7 @@ func (s *Server) handleRequest(request *Request) {
 	}
 }
 
+// handleDetect auto-detects the dependency file and registry type in the given directory.
 func (s *Server) handleDetect(request *Request) {
 	var params DetectParams
 	if err := json.Unmarshal(request.Params, &params); err != nil {
@@ -93,6 +95,7 @@ func (s *Server) handleDetect(request *Request) {
 	})
 }
 
+// handleCheck parses the dependency file and checks all dependencies for available updates.
 func (s *Server) handleCheck(request *Request) {
 	var params CheckParams
 	if err := json.Unmarshal(request.Params, &params); err != nil {
@@ -128,6 +131,7 @@ func (s *Server) handleCheck(request *Request) {
 	s.sendResult(request.ID, FromCheckResult(checkResult))
 }
 
+// handleUpdate writes updated versions for the supplied outdated dependencies back to their files.
 func (s *Server) handleUpdate(request *Request) {
 	var params UpdateParams
 	if err := json.Unmarshal(request.Params, &params); err != nil {
@@ -153,6 +157,7 @@ func (s *Server) handleUpdate(request *Request) {
 	s.sendResult(request.ID, &UpdateResult{Updated: len(outdated)})
 }
 
+// makeLogFunc returns a LogFunc that forwards bump-core log output as protocol log messages.
 func (s *Server) makeLogFunc() shared.LogFunc {
 	return func(format string, args ...any) {
 		message := fmt.Sprintf(format, args...)
@@ -160,6 +165,7 @@ func (s *Server) makeLogFunc() shared.LogFunc {
 	}
 }
 
+// sendResult encodes a successful response for the given request ID.
 func (s *Server) sendResult(id int, result interface{}) {
 	s.encoder.Encode(&Response{
 		ID:     id,
@@ -168,6 +174,7 @@ func (s *Server) sendResult(id int, result interface{}) {
 	})
 }
 
+// sendError encodes an error response for the given request ID.
 func (s *Server) sendError(id int, errorMessage string) {
 	s.encoder.Encode(&Response{
 		ID:    id,
@@ -176,6 +183,7 @@ func (s *Server) sendError(id int, errorMessage string) {
 	})
 }
 
+// sendLog encodes an out-of-band log message not tied to any request ID.
 func (s *Server) sendLog(message string) {
 	s.encoder.Encode(&LogMessage{
 		Type:    "log",
@@ -183,6 +191,7 @@ func (s *Server) sendLog(message string) {
 	})
 }
 
+// sendProgress encodes an out-of-band progress update not tied to any request ID.
 func (s *Server) sendProgress(current, total int) {
 	s.encoder.Encode(&ProgressMessage{
 		Type:    "progress",
