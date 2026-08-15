@@ -1,0 +1,17 @@
+# Build output
+/bump
+/bump-core
+homebrew-bump
+
+# Test binary, built with `go test -c`
+*.test
+
+# Go workspace file
+go.work
+
+# OS files
+.DS_Store
+
+# Package files for testing
+package*.json
+pubspec*.yaml
