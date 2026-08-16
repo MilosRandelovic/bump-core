@@ -7,19 +7,27 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/MilosRandelovic/bump-core/shared"
+	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
 
 // RegistryClient handles pub.dev and private registry operations
 type RegistryClient struct {
-	Log shared.LogFunc
+	Log        shared.LogFunc
+	configOnce sync.Once
+	config     *PubConfig
+	configErr  error
 }
 
-func (client *RegistryClient) log(format string, args ...any) {
-	if client.Log != nil {
-		client.Log(format, args...)
+func (client *RegistryClient) log(ctx context.Context, format string, args ...any) {
+	log := shared.LogFromContext(ctx)
+	if log == nil {
+		log = client.Log
+	}
+	if log != nil {
+		log(format, args...)
 	}
 }
 
@@ -36,8 +44,8 @@ func NewRegistryClient() *RegistryClient {
 }
 
 // GetLatestVersionFromRegistry fetches the latest version from a specific registry
-func (client *RegistryClient) GetLatestVersionFromRegistry(ctx context.Context, packageName, registryURL string, options shared.Options, cache *shared.Cache) (string, error) {
-	targetRegistry, err := client.resolveRegistry(registryURL)
+func (client *RegistryClient) GetLatestVersionFromRegistry(ctx context.Context, packageName, registryURL string, _ shared.Options, cache *shared.Cache) (string, error) {
+	targetRegistry, err := client.resolveRegistry(ctx, registryURL)
 	if err != nil {
 		return "", err
 	}
@@ -46,12 +54,12 @@ func (client *RegistryClient) GetLatestVersionFromRegistry(ctx context.Context, 
 	if cache != nil {
 		key := shared.GenerateCacheKey(packageName, "pub", targetRegistry.URL, "", "*")
 		if entry, ok := cache.Get(key); ok {
-			client.log("Cache hit: %s\n", packageName)
+			client.log(ctx, "Cache hit: %s\n", packageName)
 			return entry.AbsoluteLatest, nil
 		}
 	}
 
-	body, err := client.fetchPackageInfo(ctx, packageName, targetRegistry, options)
+	body, err := client.fetchPackageInfo(ctx, packageName, targetRegistry)
 	if err != nil {
 		return "", err
 	}
@@ -59,6 +67,10 @@ func (client *RegistryClient) GetLatestVersionFromRegistry(ctx context.Context, 
 	var packageInfo PubDevPackageInfo
 	if err := json.Unmarshal(body, &packageInfo); err != nil {
 		return "", fmt.Errorf("failed to parse pub.dev response: %w", err)
+	}
+	latest := strings.TrimSpace(packageInfo.Latest.Version)
+	if latest == "" {
+		return "", fmt.Errorf("no latest version found for %s", packageName)
 	}
 
 	// Cache the result if cache is enabled
@@ -69,18 +81,18 @@ func (client *RegistryClient) GetLatestVersionFromRegistry(ctx context.Context, 
 			Registry:         targetRegistry.URL,
 			CurrentVersion:   "",
 			Constraint:       "*",
-			AbsoluteLatest:   packageInfo.Latest.Version,
-			ConstraintLatest: packageInfo.Latest.Version,
+			AbsoluteLatest:   latest,
+			ConstraintLatest: latest,
 			Expiry:           time.Now().Add(10 * time.Minute),
 		}
 		cache.Set(entry)
 	}
-	return packageInfo.Latest.Version, nil
+	return latest, nil
 }
 
 // GetBothLatestVersions fetches both the absolute latest version and the latest version satisfying a constraint
-func (client *RegistryClient) GetBothLatestVersions(ctx context.Context, packageName, constraint, registryURL string, options shared.Options, cache *shared.Cache) (string, string, error) {
-	targetRegistry, err := client.resolveRegistry(registryURL)
+func (client *RegistryClient) GetBothLatestVersions(ctx context.Context, packageName, constraint, registryURL string, _ shared.Options, cache *shared.Cache) (string, string, error) {
+	targetRegistry, err := client.resolveRegistry(ctx, registryURL)
 	if err != nil {
 		return "", "", err
 	}
@@ -89,12 +101,12 @@ func (client *RegistryClient) GetBothLatestVersions(ctx context.Context, package
 	if cache != nil {
 		key := shared.GenerateCacheKey(packageName, "pub", targetRegistry.URL, "", constraint)
 		if entry, ok := cache.Get(key); ok {
-			client.log("Cache hit: %s\n", packageName)
+			client.log(ctx, "Cache hit: %s\n", packageName)
 			return entry.AbsoluteLatest, entry.ConstraintLatest, nil
 		}
 	}
 
-	body, err := client.fetchPackageInfo(ctx, packageName, targetRegistry, options)
+	body, err := client.fetchPackageInfo(ctx, packageName, targetRegistry)
 	if err != nil {
 		return "", "", err
 	}
@@ -117,7 +129,7 @@ func (client *RegistryClient) GetBothLatestVersions(ctx context.Context, package
 
 	absoluteLatest, constraintLatest, err := shared.FindBothLatestVersions(versions, constraint)
 	if err != nil {
-		return "", "", err
+		return absoluteLatest, constraintLatest, err
 	}
 
 	// Cache the result if cache is enabled
@@ -138,11 +150,21 @@ func (client *RegistryClient) GetBothLatestVersions(ctx context.Context, package
 	return absoluteLatest, constraintLatest, nil
 }
 
-func (client *RegistryClient) resolveRegistry(registryURL string) (RegistryConfig, error) {
-	config, err := parsePubConfig()
-	if err != nil {
-		return RegistryConfig{}, fmt.Errorf("failed to parse pub config: %w", err)
+func (client *RegistryClient) resolveRegistry(ctx context.Context, registryURL string) (RegistryConfig, error) {
+	client.configOnce.Do(func() {
+		log := shared.LogFromContext(ctx)
+		if log == nil {
+			log = client.Log
+		}
+		client.config, client.configErr = parsePubConfig(log)
+		if client.configErr != nil {
+			client.configErr = fmt.Errorf("failed to parse pub config: %w", client.configErr)
+		}
+	})
+	if client.configErr != nil {
+		return RegistryConfig{}, client.configErr
 	}
+	config := client.config
 
 	if registryURL != "" {
 		hostname := shared.ExtractHostname(registryURL)
@@ -160,10 +182,10 @@ func (client *RegistryClient) resolveRegistry(registryURL string) (RegistryConfi
 }
 
 // fetchPackageInfo is a shared method to fetch package information from registries
-func (client *RegistryClient) fetchPackageInfo(ctx context.Context, packageName string, targetRegistry RegistryConfig, options shared.Options) ([]byte, error) {
+func (client *RegistryClient) fetchPackageInfo(ctx context.Context, packageName string, targetRegistry RegistryConfig) ([]byte, error) {
 	url := fmt.Sprintf("%s/api/packages/%s", strings.TrimRight(targetRegistry.URL, "/"), packageName)
 
-	client.log("Checking pub package: %s (registry: %s)\n", packageName, targetRegistry.URL)
+	client.log(ctx, "Checking pub package: %s (registry: %s)\n", packageName, targetRegistry.URL)
 
 	httpClient := &http.Client{Timeout: 10 * time.Second}
 	request, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -174,7 +196,7 @@ func (client *RegistryClient) fetchPackageInfo(ctx context.Context, packageName 
 	// Add authentication if available for this registry
 	if targetRegistry.AuthToken != "" {
 		request.Header.Set("Authorization", "Bearer "+targetRegistry.AuthToken)
-		client.log("Using authentication for registry: %s\n", targetRegistry.URL)
+		client.log(ctx, "Using authentication for registry: %s\n", targetRegistry.URL)
 	}
 
 	response, err := httpClient.Do(request)

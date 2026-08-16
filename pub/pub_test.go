@@ -1,14 +1,46 @@
 package pub
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/MilosRandelovic/bump-core/shared"
+	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
+
+func applyTestUpdate(filePath string, outdated []shared.OutdatedDependency, updater *Updater, options shared.Options) error {
+	if err := updater.ValidateOptions(options); err != nil {
+		return err
+	}
+	prepared, err := shared.PrepareDependenciesInFile(filePath, outdated, updater.GetPatternProvider())
+	if err != nil || prepared == nil {
+		return err
+	}
+	return prepared.Apply()
+}
+
+func TestRegistryClientPreservesAbsoluteLatestOnConstraintError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(response, `{"versions":[{"version":"1.0.0"},{"version":"1.7.0"}]}`)
+	}))
+	defer server.Close()
+
+	client := NewRegistryClient()
+	absolute, compatible, err := client.GetBothLatestVersions(context.Background(), "example", "^0.0.1", server.URL, shared.Options{}, nil)
+	if !errors.Is(err, shared.ErrNoVersionsSatisfyConstraint) {
+		t.Fatalf("expected constraint error, got %v", err)
+	}
+	if absolute != "1.7.0" || compatible != "" {
+		t.Fatalf("versions = (%q, %q), expected (1.7.0, empty)", absolute, compatible)
+	}
+}
 
 func TestParsePubspecYaml(t *testing.T) {
 	// Create a temporary pubspec.yaml file
@@ -110,6 +142,120 @@ dev_dependencies:
 	}
 }
 
+func TestParsePubspecInlineComments(t *testing.T) {
+	pubspecPath := filepath.Join(t.TempDir(), "pubspec.yaml")
+	content := `name: inline_comments
+dependencies:
+  http: ^1.2.3 # keep this explanation
+  quoted: ">=1.0.0 <2.0.0" # and this one
+`
+	if err := os.WriteFile(pubspecPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dependencies, err := NewParser().ParseDependencies(pubspecPath, shared.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dependencies) != 2 {
+		t.Fatalf("dependencies = %#v", dependencies)
+	}
+	if dependencies[0].OriginalVersion != "^1.2.3" || dependencies[1].OriginalVersion != ">=1.0.0 <2.0.0" {
+		t.Fatalf("inline comments leaked into versions: %#v", dependencies)
+	}
+}
+
+func TestUpdateQuotedCompoundConstraintPreservesQuoteAndComment(t *testing.T) {
+	pubspecPath := filepath.Join(t.TempDir(), "pubspec.yaml")
+	original := "name: quoted\ndependencies:\n   test: \">=1.21.0 <2.0.0\" # required by yaml\n"
+	if err := os.WriteFile(pubspecPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dependencies, err := NewParser().ParseDependencies(pubspecPath, shared.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dependencies) != 1 {
+		t.Fatalf("dependencies = %#v", dependencies)
+	}
+	dependency := dependencies[0]
+	if dependency.OriginalVersion != ">=1.21.0 <2.0.0" || dependency.LineNumber != 3 {
+		t.Fatalf("unexpected parsed dependency: %#v", dependency)
+	}
+
+	err = applyTestUpdate(pubspecPath, []shared.OutdatedDependency{{
+		BaseDependency: dependency.BaseDependency,
+		CurrentVersion: dependency.Version,
+		LatestVersion:  "1.25.0",
+	}}, NewUpdater(), shared.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := os.ReadFile(pubspecPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := "name: quoted\ndependencies:\n   test: \">=1.25.0 <2.0.0\" # required by yaml\n"
+	if string(updated) != expected {
+		t.Fatalf("updated pubspec = %q, expected %q", updated, expected)
+	}
+}
+
+func TestParsePubspecDerivesDependencyIndentation(t *testing.T) {
+	for _, indentation := range []string{"   ", "    "} {
+		t.Run(fmt.Sprintf("%d_spaces", len(indentation)), func(t *testing.T) {
+			pubspecPath := filepath.Join(t.TempDir(), "pubspec.yaml")
+			content := "name: indentation\ndependencies:\n" + indentation + "http: ^1.2.3\n" + indentation + "hosted_package:\n" + indentation + indentation + "hosted: https://packages.example.test/pub\n" + indentation + indentation + "version: ^2.0.0\n"
+			if err := os.WriteFile(pubspecPath, []byte(content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			dependencies, err := NewParser().ParseDependencies(pubspecPath, shared.Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(dependencies) != 2 || dependencies[0].Name != "http" || dependencies[1].Name != "hosted_package" {
+				t.Fatalf("dependencies = %#v", dependencies)
+			}
+			if dependencies[1].HostedURL != "https://packages.example.test/pub" {
+				t.Fatalf("hosted URL = %q", dependencies[1].HostedURL)
+			}
+		})
+	}
+}
+
+func TestParsePubspecLogsEmptyDependencySection(t *testing.T) {
+	pubspecPath := filepath.Join(t.TempDir(), "pubspec.yaml")
+	if err := os.WriteFile(pubspecPath, []byte("name: empty\ndependencies:\n  # no packages\nversion: 1.0.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var logs strings.Builder
+	parser := NewParser()
+	parser.Log = func(format string, args ...any) { fmt.Fprintf(&logs, format, args...) }
+	dependencies, err := parser.ParseDependencies(pubspecPath, shared.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dependencies) != 0 || !strings.Contains(logs.String(), "dependencies section contains no dependency entries") {
+		t.Fatalf("dependencies = %#v, logs = %q", dependencies, logs.String())
+	}
+}
+
+func TestRegistryClientRejectsEmptyLatestVersion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(response, `{"latest":{}}`)
+	}))
+	defer server.Close()
+
+	client := NewRegistryClient()
+	latest, err := client.GetLatestVersionFromRegistry(context.Background(), "example", server.URL, shared.Options{}, nil)
+	if err == nil || latest != "" || !strings.Contains(err.Error(), "no latest version") {
+		t.Fatalf("latest = %q, error = %v", latest, err)
+	}
+}
+
 func TestUpdatePubspecYaml(t *testing.T) {
 	// Create a temporary pubspec.yaml file
 	tempDir := t.TempDir()
@@ -159,7 +305,7 @@ dev_dependencies:
 	}
 
 	updaterInstance := NewUpdater()
-	err = updaterInstance.UpdateDependencies(pubspecPath, outdated, shared.Options{})
+	err = applyTestUpdate(pubspecPath, outdated, updaterInstance, shared.Options{})
 	if err != nil {
 		t.Fatalf("Failed to update pubspec.yaml: %v", err)
 	}
@@ -411,7 +557,7 @@ custom_config:
 
 	// Update the dependencies
 	updater := NewUpdater()
-	err = updater.UpdateDependencies(testFile, outdatedDependencies, shared.Options{})
+	err = applyTestUpdate(testFile, outdatedDependencies, updater, shared.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -566,7 +712,7 @@ dev_dependencies:
 	}
 
 	updaterInstance := NewUpdater()
-	err = updaterInstance.UpdateDependencies(pubspecPath, outdated, shared.Options{})
+	err = applyTestUpdate(pubspecPath, outdated, updaterInstance, shared.Options{})
 	if err != nil {
 		t.Fatalf("Failed to update pubspec.yaml: %v", err)
 	}
@@ -687,10 +833,16 @@ func TestPubConfigIntegration(t *testing.T) {
 	// Create temporary directories to simulate the real environment
 	tempDir := t.TempDir()
 
-	// Create fake home directory structure
+	// Create a fake platform-specific user configuration directory.
 	homeDir := filepath.Join(tempDir, "home")
-	dartDir := filepath.Join(homeDir, "Library", "Application Support", "dart")
-	err := os.MkdirAll(dartDir, 0755)
+	t.Setenv("HOME", homeDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(homeDir, ".config"))
+	configDir, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatalf("Failed to resolve user config directory: %v", err)
+	}
+	dartDir := filepath.Join(configDir, "dart")
+	err = os.MkdirAll(dartDir, 0755)
 	if err != nil {
 		t.Fatalf("Failed to create dart directory: %v", err)
 	}
@@ -712,13 +864,8 @@ func TestPubConfigIntegration(t *testing.T) {
 		t.Fatalf("Failed to create pub-tokens.json: %v", err)
 	}
 
-	// Save and set temporary HOME
-	originalHome := os.Getenv("HOME")
-	defer os.Setenv("HOME", originalHome)
-	os.Setenv("HOME", homeDir)
-
 	// Test the full configuration parsing
-	config, err := parsePubConfig()
+	config, err := parsePubConfig(nil)
 	if err != nil {
 		t.Fatalf("Failed to parse pub config: %v", err)
 	}
@@ -752,6 +899,71 @@ func TestPubConfigIntegration(t *testing.T) {
 				t.Errorf("Expected token for %s to be '%s', got '%s'", hostname, expected.token, registry.AuthToken)
 			}
 		}
+	}
+}
+
+func TestPubConfigLogsMalformedTokenFile(t *testing.T) {
+	homeDirectory := t.TempDir()
+	t.Setenv("HOME", homeDirectory)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(homeDirectory, ".config"))
+	configDirectory, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dartDirectory := filepath.Join(configDirectory, "dart")
+	if err := os.MkdirAll(dartDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dartDirectory, "pub-tokens.json"), []byte("{invalid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var logs strings.Builder
+	config, err := parsePubConfig(func(format string, args ...any) { fmt.Fprintf(&logs, format, args...) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Registries["pub.dev"].URL != "https://pub.dev" {
+		t.Fatalf("default registry missing: %#v", config)
+	}
+	if !strings.Contains(logs.String(), "Could not load pub authentication tokens") {
+		t.Fatalf("warning was not logged: %q", logs.String())
+	}
+}
+
+func TestRegistryClientCachesPubConfiguration(t *testing.T) {
+	homeDirectory := t.TempDir()
+	t.Setenv("HOME", homeDirectory)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(homeDirectory, ".config"))
+	configDirectory, err := os.UserConfigDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dartDirectory := filepath.Join(configDirectory, "dart")
+	if err := os.MkdirAll(dartDirectory, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tokensPath := filepath.Join(dartDirectory, "pub-tokens.json")
+	writeToken := func(token string) {
+		t.Helper()
+		content := fmt.Sprintf(`{"version":1,"hosted":[{"url":"https://packages.example.test/pub","token":%q}]}`, token)
+		if err := os.WriteFile(tokensPath, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeToken("first-token")
+	client := NewRegistryClient()
+	first, err := client.resolveRegistry(context.Background(), "https://packages.example.test/pub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeToken("second-token")
+	second, err := client.resolveRegistry(context.Background(), "https://packages.example.test/pub")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.AuthToken != "first-token" || second.AuthToken != first.AuthToken {
+		t.Fatalf("tokens = (%q, %q), expected cached first token", first.AuthToken, second.AuthToken)
 	}
 }
 
@@ -803,7 +1015,7 @@ flutter:
 		},
 	}
 
-	err = updater.UpdateDependencies(pubspecPath1, outdatedDependencies, shared.Options{})
+	err = applyTestUpdate(pubspecPath1, outdatedDependencies, updater, shared.Options{})
 	if err != nil {
 		t.Fatalf("Failed to update dependencies: %v", err)
 	}
@@ -840,7 +1052,7 @@ flutter:
 	}
 
 	updaterInstance := NewUpdater()
-	err = updaterInstance.UpdateDependencies(pubspecPath2, devDependencies, shared.Options{})
+	err = applyTestUpdate(pubspecPath2, devDependencies, updaterInstance, shared.Options{})
 	if err != nil {
 		t.Fatalf("Failed to update dev dependencies: %v", err)
 	}

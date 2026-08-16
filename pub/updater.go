@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"regexp"
 
-	"github.com/MilosRandelovic/bump-core/shared"
+	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
 
 // PatternProvider implements the pattern provider for pub pubspec.yaml files
@@ -12,18 +12,21 @@ type PatternProvider struct{}
 
 // GetPattern returns the regex pattern for matching pub dependency lines
 func (patternProvider *PatternProvider) GetPattern(dependency shared.OutdatedDependency) string {
+	// Group 2 must contain only the constraint because shared update validation
+	// compares it with OriginalVersion. Groups 1, 3, and 4 preserve the quote
+	// style, trailing whitespace, and inline comment respectively.
 	// For hosted packages, match the version line
 	// For simple packages, match the package name line
 	if dependency.HostedURL != "" {
-		return `(\s*version\s*:\s*)([^\s#]+)`
+		return `(\s*version\s*:\s*["']?)([^"'#]*[^"'#\s])(["']?)(\s*(?:#.*)?)$`
 	}
 	escapedName := regexp.QuoteMeta(dependency.Name)
-	return fmt.Sprintf(`(\s*%s\s*:\s*)([^\s#]+)`, escapedName)
+	return fmt.Sprintf(`(\s*%s\s*:\s*["']?)([^"'#]*[^"'#\s])(["']?)(\s*(?:#.*)?)$`, escapedName)
 }
 
 // GetReplacement returns the replacement string for pub dependency lines
 func (patternProvider *PatternProvider) GetReplacement(dependency shared.OutdatedDependency, newVersion string) string {
-	return fmt.Sprintf(`${1}%s`, newVersion)
+	return fmt.Sprintf(`${1}%s${3}${4}`, newVersion)
 }
 
 // Updater handles Dart pubspec.yaml updating
@@ -62,14 +65,6 @@ func (updater *Updater) ValidateOptions(options shared.Options) error {
 		return fmt.Errorf("monorepo mode is only supported for npm projects")
 	}
 	return nil
-}
-
-// UpdateDependencies updates dependencies in a file - thin wrapper for tests that delegates to shared logic
-func (updater *Updater) UpdateDependencies(filePath string, outdated []shared.OutdatedDependency, options shared.Options) error {
-	if err := updater.ValidateOptions(options); err != nil {
-		return err
-	}
-	return shared.UpdateDependenciesInFile(filePath, outdated, updater.GetPatternProvider(), options)
 }
 
 // Ensure Updater implements the interface

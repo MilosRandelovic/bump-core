@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/MilosRandelovic/bump-core/internal/protocol"
-	"github.com/MilosRandelovic/bump-core/shared"
+	"github.com/MilosRandelovic/bump-core/v2/internal/protocol"
+	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
 
 func main() {

@@ -12,11 +12,52 @@ import (
 // Version is the single source of truth for the bump version across all repos
 const Version = "2.0.0"
 
-var versionPrefixCaptureRegex = regexp.MustCompile(`^([\^~>=<]+)`)
+var (
+	versionPrefixCaptureRegex = regexp.MustCompile(`^([\^~>=<]+)`)
+	versionTokenRegex         = regexp.MustCompile(`[vV]?\d+(?:\.\d+){0,2}(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?`)
+)
 
-// CleanVersion removes prefix characters (^, ~, >=, etc.) from version strings
+// CleanVersion extracts the first version from a version or constraint string.
+// For example, both "^1.2.3" and ">=1.2.3 <2.0.0" return "1.2.3".
 func CleanVersion(version string) string {
+	if match := versionTokenRegex.FindString(version); match != "" {
+		return strings.TrimPrefix(strings.TrimPrefix(match, "v"), "V")
+	}
 	return versionPrefixCaptureRegex.ReplaceAllString(version, "")
+}
+
+// UpdateVersionConstraint replaces the first version token while preserving the
+// original constraint operators and any remaining range clauses.
+func UpdateVersionConstraint(constraint, newVersion string) string {
+	location := matchingConstraintVersionLocation(constraint, newVersion)
+	if location == nil {
+		location = versionTokenRegex.FindStringIndex(constraint)
+	}
+	if location == nil {
+		return GetVersionPrefix(constraint) + newVersion
+	}
+	return constraint[:location[0]] + newVersion + constraint[location[1]:]
+}
+
+func matchingConstraintVersionLocation(constraint, version string) []int {
+	parsedVersion, err := semver.NewVersion(version)
+	if err != nil {
+		return nil
+	}
+
+	offset := 0
+	for _, clause := range strings.Split(constraint, "||") {
+		trimmedClause := strings.TrimSpace(clause)
+		clauseConstraint, err := semver.NewConstraint(trimmedClause)
+		if err == nil && clauseConstraint.Check(parsedVersion) {
+			location := versionTokenRegex.FindStringIndex(clause)
+			if location != nil {
+				return []int{offset + location[0], offset + location[1]}
+			}
+		}
+		offset += len(clause) + len("||")
+	}
+	return nil
 }
 
 // HasSemanticPrefix checks if version has semantic versioning prefix
@@ -85,7 +126,9 @@ func FindBothLatestVersions(versions []string, constraint string) (string, strin
 		return "", "", fmt.Errorf("no versions provided")
 	}
 
-	// Check if the current version (from constraint) is a pre-release
+	// Use the first version token as the current/reference version. A constraint
+	// is not itself a version, so stripping only its leading operator breaks
+	// compound ranges such as ">=1.0.0 <2.0.0".
 	currentVersion := CleanVersion(constraint)
 	currentSemver, err := semver.NewVersion(currentVersion)
 	if err != nil {
@@ -115,6 +158,13 @@ func FindBothLatestVersions(versions []string, constraint string) (string, strin
 
 	// Determine if we should include prereleases based on current version
 	includePrerelease := currentSemver.Prerelease() != ""
+	for _, versionToken := range versionTokenRegex.FindAllString(constraint, -1) {
+		parsedToken, parseErr := semver.NewVersion(strings.TrimPrefix(strings.TrimPrefix(versionToken, "v"), "V"))
+		if parseErr == nil && parsedToken.Prerelease() != "" {
+			includePrerelease = true
+			break
+		}
+	}
 
 	// Find absolute latest (stable or prerelease depending on current version)
 	var absoluteLatest string

@@ -3,14 +3,19 @@ package parser
 import (
 	"fmt"
 
-	"github.com/MilosRandelovic/bump-core/npm"
-	"github.com/MilosRandelovic/bump-core/pub"
-	"github.com/MilosRandelovic/bump-core/shared"
+	"github.com/MilosRandelovic/bump-core/v2/npm"
+	"github.com/MilosRandelovic/bump-core/v2/pub"
+	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
 
 // ParseDependencies parses dependencies from a file based on its type
 func ParseDependencies(filePath string, registryType shared.RegistryType, options shared.Options) ([]shared.Dependency, error) {
-	parser, err := getParser(registryType)
+	return ParseDependenciesWithLog(filePath, registryType, options, nil)
+}
+
+// ParseDependenciesWithLog parses dependencies and forwards ecosystem-specific diagnostics to log.
+func ParseDependenciesWithLog(filePath string, registryType shared.RegistryType, options shared.Options, log shared.LogFunc) ([]shared.Dependency, error) {
+	parser, err := getParser(registryType, log)
 	if err != nil {
 		return nil, err
 	}
@@ -18,12 +23,16 @@ func ParseDependencies(filePath string, registryType shared.RegistryType, option
 }
 
 // getParser returns the appropriate parser for the given file type
-func getParser(registryType shared.RegistryType) (shared.Parser, error) {
+func getParser(registryType shared.RegistryType, log shared.LogFunc) (shared.Parser, error) {
 	switch registryType {
 	case shared.Npm:
-		return npm.NewParser(), nil
+		parser := npm.NewParser()
+		parser.Log = log
+		return parser, nil
 	case shared.Pub:
-		return pub.NewParser(), nil
+		parser := pub.NewParser()
+		parser.Log = log
+		return parser, nil
 	default:
 		return nil, fmt.Errorf("unsupported registry type: %s", registryType)
 	}

@@ -1,19 +1,29 @@
 package npm
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
-	"github.com/MilosRandelovic/bump-core/shared"
+	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
 
 // Parser handles npm package.json parsing
 type Parser struct {
 	Log shared.LogFunc
+}
+
+type packageManifest struct {
+	Workspaces       json.RawMessage   `json:"workspaces"`
+	Dependencies     map[string]string `json:"dependencies"`
+	DevDependencies  map[string]string `json:"devDependencies"`
+	PeerDependencies map[string]string `json:"peerDependencies"`
 }
 
 // NewParser creates a new npm parser
@@ -28,28 +38,24 @@ func (parser *Parser) ParseDependencies(filePath string, options shared.Options)
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
 
+	var packageData packageManifest
+	if err := json.Unmarshal(data, &packageData); err != nil {
+		return nil, fmt.Errorf("failed to parse package.json: %w", err)
+	}
+
 	if options.Monorepo {
-		var packageData struct {
-			Workspaces json.RawMessage `json:"workspaces"`
-		}
-
-		if err := json.Unmarshal(data, &packageData); err != nil {
-			parser.log("Warning: could not parse package.json for workspaces detection (%s): %v\n", filePath, err)
-			return parser.parseFile(filePath, data, options)
-		}
-
 		workspacePatterns, err := extractWorkspacePatterns(packageData.Workspaces)
 		if err != nil {
 			parser.log("Warning: invalid workspaces format in %s: %v\n", filePath, err)
-			return parser.parseFile(filePath, data, options)
+			return parser.parseManifest(filePath, data, packageData, options), nil
 		}
 
 		if len(workspacePatterns) > 0 {
-			return parser.parseWorkspaces(filePath, data, workspacePatterns, options)
+			return parser.parseWorkspaces(filePath, data, packageData, workspacePatterns, options)
 		}
 	}
 
-	return parser.parseFile(filePath, data, options)
+	return parser.parseManifest(filePath, data, packageData, options), nil
 }
 
 func (parser *Parser) log(format string, args ...any) {
@@ -59,6 +65,14 @@ func (parser *Parser) log(format string, args ...any) {
 }
 
 func (parser *Parser) parseFile(filePath string, data []byte, options shared.Options) ([]shared.Dependency, error) {
+	var manifest packageManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return nil, fmt.Errorf("failed to parse package.json: %w", err)
+	}
+	return parser.parseManifest(filePath, data, manifest, options), nil
+}
+
+func (parser *Parser) parseManifest(filePath string, data []byte, manifest packageManifest, options shared.Options) []shared.Dependency {
 	// Parse line by line to track line numbers and extract dependencies
 	lines := strings.Split(string(data), "\n")
 	var dependencies []shared.Dependency
@@ -127,17 +141,15 @@ func (parser *Parser) parseFile(filePath string, data []byte, options shared.Opt
 		}
 	}
 
-	return dependencies, nil
+	dependencies = filterManifestDependencies(dependencies, manifest, options)
+	return appendMissingManifestDependencies(dependencies, filePath, data, manifest, options)
 }
 
-func (parser *Parser) parseWorkspaces(rootPath string, rootData []byte, patterns []string, options shared.Options) ([]shared.Dependency, error) {
+func (parser *Parser) parseWorkspaces(rootPath string, rootData []byte, rootManifest packageManifest, patterns []string, options shared.Options) ([]shared.Dependency, error) {
 	rootDir := filepath.Dir(rootPath)
 	all := []shared.Dependency{}
 
-	root, err := parser.parseFile(rootPath, rootData, options)
-	if err != nil {
-		return nil, err
-	}
+	root := parser.parseManifest(rootPath, rootData, rootManifest, options)
 	all = append(all, root...)
 
 	for _, pattern := range patterns {
@@ -177,6 +189,102 @@ func (parser *Parser) parseWorkspaces(rootPath string, rootData []byte, patterns
 	}
 
 	return all, nil
+}
+
+func filterManifestDependencies(dependencies []shared.Dependency, manifest packageManifest, options shared.Options) []shared.Dependency {
+	filtered := dependencies[:0]
+	for _, dependency := range dependencies {
+		versions := manifestVersions(manifest, dependency.Type, options)
+		if version, exists := versions[dependency.Name]; exists && version == dependency.OriginalVersion {
+			filtered = append(filtered, dependency)
+		}
+	}
+	return filtered
+}
+
+func appendMissingManifestDependencies(dependencies []shared.Dependency, filePath string, data []byte, manifest packageManifest, options shared.Options) []shared.Dependency {
+	type positionedDependency struct {
+		dependency shared.Dependency
+		position   int
+	}
+
+	seen := make(map[string]struct{}, len(dependencies))
+	for _, dependency := range dependencies {
+		seen[fmt.Sprintf("%d:%s", dependency.Type, dependency.Name)] = struct{}{}
+	}
+
+	var missing []positionedDependency
+	sections := []struct {
+		dependencyType shared.DependencyType
+		versions       map[string]string
+	}{
+		{shared.Dependencies, manifest.Dependencies},
+		{shared.DevDependencies, manifest.DevDependencies},
+	}
+	if options.IncludePeerDependencies {
+		sections = append(sections, struct {
+			dependencyType shared.DependencyType
+			versions       map[string]string
+		}{shared.PeerDependencies, manifest.PeerDependencies})
+	}
+
+	for _, section := range sections {
+		for name, version := range section.versions {
+			key := fmt.Sprintf("%d:%s", section.dependencyType, name)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+
+			encodedName := strconv.Quote(name)
+			encodedVersion := strconv.Quote(version)
+			pattern := regexp.MustCompile(regexp.QuoteMeta(encodedName) + `\s*:\s*` + regexp.QuoteMeta(encodedVersion))
+			location := pattern.FindIndex(data)
+			if location == nil {
+				continue
+			}
+			missing = append(missing, positionedDependency{
+				position: location[0],
+				dependency: shared.Dependency{
+					BaseDependency: shared.BaseDependency{
+						Name:            name,
+						OriginalVersion: version,
+						Type:            section.dependencyType,
+						FilePath:        filePath,
+						LineNumber:      bytes.Count(data[:location[0]], []byte("\n")) + 1,
+					},
+					Version: shared.CleanVersion(version),
+				},
+			})
+		}
+	}
+
+	sort.Slice(missing, func(first, second int) bool {
+		if missing[first].position != missing[second].position {
+			return missing[first].position < missing[second].position
+		}
+		if missing[first].dependency.Type != missing[second].dependency.Type {
+			return missing[first].dependency.Type < missing[second].dependency.Type
+		}
+		return missing[first].dependency.Name < missing[second].dependency.Name
+	})
+	for _, positioned := range missing {
+		dependencies = append(dependencies, positioned.dependency)
+	}
+	return dependencies
+}
+
+func manifestVersions(manifest packageManifest, dependencyType shared.DependencyType, options shared.Options) map[string]string {
+	switch dependencyType {
+	case shared.Dependencies:
+		return manifest.Dependencies
+	case shared.DevDependencies:
+		return manifest.DevDependencies
+	case shared.PeerDependencies:
+		if options.IncludePeerDependencies {
+			return manifest.PeerDependencies
+		}
+	}
+	return nil
 }
 
 func extractWorkspacePatterns(workspacesRaw json.RawMessage) ([]string, error) {

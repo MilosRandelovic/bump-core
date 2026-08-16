@@ -17,12 +17,34 @@ func TestCleanVersion(t *testing.T) {
 		{"<4.0.0", "4.0.0"},
 		{"1.5.0", "1.5.0"},
 		{"^>=1.0.0", "1.0.0"},
+		{">=1.21.0 <2.0.0", "1.21.0"},
+		{">=1.0.0 || ^2.0.0", "1.0.0"},
 	}
 
 	for _, test := range tests {
 		result := CleanVersion(test.input)
 		if result != test.expected {
 			t.Errorf("CleanVersion(%s) = %s, expected %s", test.input, result, test.expected)
+		}
+	}
+}
+
+func TestUpdateVersionConstraint(t *testing.T) {
+	tests := []struct {
+		constraint string
+		latest     string
+		expected   string
+	}{
+		{"1.0.0", "1.2.0", "1.2.0"},
+		{"^1.0.0", "1.2.0", "^1.2.0"},
+		{">=1.0.0 <2.0.0", "1.9.0", ">=1.9.0 <2.0.0"},
+		{">=1.0.0 || ^2.0.0", "1.9.0", ">=1.9.0 || ^2.0.0"},
+		{"^1.0.0 || ^2.0.0", "2.5.0", "^1.0.0 || ^2.5.0"},
+	}
+
+	for _, test := range tests {
+		if result := UpdateVersionConstraint(test.constraint, test.latest); result != test.expected {
+			t.Errorf("UpdateVersionConstraint(%q, %q) = %q, expected %q", test.constraint, test.latest, result, test.expected)
 		}
 	}
 }

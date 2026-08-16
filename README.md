@@ -10,9 +10,11 @@ bump-core packages are importable by other Go modules:
 
 ```go
 import (
-    "github.com/MilosRandelovic/bump-core/parser"
-    "github.com/MilosRandelovic/bump-core/updater"
-    "github.com/MilosRandelovic/bump-core/shared"
+	"context"
+
+	"github.com/MilosRandelovic/bump-core/v2/parser"
+	"github.com/MilosRandelovic/bump-core/v2/shared"
+	"github.com/MilosRandelovic/bump-core/v2/updater"
 )
 
 // Auto-detect dependency file
@@ -22,7 +24,7 @@ filePath, registryType, err := parser.AutoDetectDependencyFile(directory, nil)
 dependencies, err := parser.ParseDependencies(filePath, registryType, options)
 
 // Check for outdated dependencies (empty workingDirectory falls back to the process CWD)
-result, err := updater.CheckOutdated(dependencies, registryType, options, "", nil, nil)
+result, err := updater.CheckOutdated(context.Background(), dependencies, registryType, options, "", nil, nil)
 
 // Update dependency files
 err = updater.UpdateDependencies(filePath, result.Outdated, registryType, options, "", nil)
@@ -48,14 +50,18 @@ Send JSON requests (one per line) to stdin, receive JSON responses on stdout:
 {"method": "detect", "id": 1, "params": {"directory": "/path/to/project"}}
 {"method": "check", "id": 2, "params": {"filePath": "/path/to/package.json", "registryType": "npm", "options": {}}}
 {"method": "update", "id": 3, "params": {"filePath": "/path/to/package.json", "registryType": "npm", "options": {}, "outdated": [...]}}
+{"method": "cancel", "id": 4, "params": {"id": 2}}
 ```
 
 Response types:
 
 - `{"type": "result", "id": 1, "result": {...}}` — success
 - `{"type": "error", "id": 1, "error": "message"}` — error
-- `{"type": "log", "message": "..."}` — out-of-band log message
-- `{"type": "progress", "current": 3, "total": 10}` — progress update
+- `{"type": "error", "id": 9, "code": "request_limit_exceeded", "error": "too many active requests (maximum 8)"}` — retryable capacity error
+- `{"type": "log", "id": 2, "message": "..."}` — request-scoped log message
+- `{"type": "progress", "id": 2, "current": 3, "total": 10}` — request-scoped progress update
+
+Requests may run concurrently. Send `cancel` with the target request ID to stop an active check; the cancel result reports whether that request was still active. The sidecar accepts up to eight active requests and rejects additional work with the retryable `request_limit_exceeded` code until a slot is available, while cancellation requests remain available.
 
 ## Features
 
@@ -66,6 +72,10 @@ Response types:
 - Monorepo/workspace detection for npm
 - Version caching for repeated checks
 - Pre-release version filtering
+- Bounded parallel registry checks with deterministic results
+- Stale-safe dependency updates with validation across all targets and atomic replacement per file
+
+The persistent cache is stored as versioned JSON in `~/.bump-cache`. Concurrent checks merge their entries during persistence rather than overwriting one another.
 
 ## Project Structure
 

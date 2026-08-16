@@ -1,13 +1,47 @@
 package npm
 
 import (
+	"context"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/MilosRandelovic/bump-core/shared"
+	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
+
+func applyTestUpdate(filePath string, outdated []shared.OutdatedDependency, updater *Updater, options shared.Options) error {
+	if err := updater.ValidateOptions(options); err != nil {
+		return err
+	}
+	prepared, err := shared.PrepareDependenciesInFile(filePath, outdated, updater.GetPatternProvider())
+	if err != nil || prepared == nil {
+		return err
+	}
+	return prepared.Apply()
+}
+
+func TestRegistryClientPreservesAbsoluteLatestOnConstraintError(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(response, `{"dist-tags":{"latest":"1.7.0"},"versions":{"1.0.0":{"version":"1.0.0"},"1.7.0":{"version":"1.7.0"}}}`)
+	}))
+	defer server.Close()
+
+	client := NewRegistryClient()
+	client.ConfigDirectory = t.TempDir()
+	absolute, compatible, err := client.GetBothLatestVersions(context.Background(), "example", "^0.0.1", server.URL, shared.Options{}, nil)
+	if !errors.Is(err, shared.ErrNoVersionsSatisfyConstraint) {
+		t.Fatalf("expected constraint error, got %v", err)
+	}
+	if absolute != "1.7.0" || compatible != "" {
+		t.Fatalf("versions = (%q, %q), expected (1.7.0, empty)", absolute, compatible)
+	}
+}
 
 func TestParsePackageJson(t *testing.T) {
 	// Create a temporary package.json file
@@ -74,6 +108,37 @@ func TestParsePackageJson(t *testing.T) {
 
 	if originalVersionMap["typescript"] != ">=4.9.0" {
 		t.Errorf("Expected typescript original version '>=4.9.0', got '%s'", originalVersionMap["typescript"])
+	}
+}
+
+func TestParseSingleLinePackageJSON(t *testing.T) {
+	packagePath := filepath.Join(t.TempDir(), "package.json")
+	content := `{"dependencies":{"react":"^18.0.0","lodash":"~4.17.20"},"devDependencies":{"typescript":">=5.0.0"}}`
+	if err := os.WriteFile(packagePath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dependencies, err := NewParser().ParseDependencies(packagePath, shared.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(dependencies) != 3 {
+		t.Fatalf("dependencies = %#v", dependencies)
+	}
+	for _, dependency := range dependencies {
+		if dependency.LineNumber != 1 {
+			t.Fatalf("%s line = %d, expected 1", dependency.Name, dependency.LineNumber)
+		}
+	}
+}
+
+func TestParseInvalidPackageJSONReturnsError(t *testing.T) {
+	packagePath := filepath.Join(t.TempDir(), "package.json")
+	if err := os.WriteFile(packagePath, []byte(`{"dependencies":{"broken":}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewParser().ParseDependencies(packagePath, shared.Options{}); err == nil {
+		t.Fatal("expected invalid JSON error")
 	}
 }
 
@@ -200,7 +265,7 @@ func TestUpdatePackageJson(t *testing.T) {
 	}
 
 	updater := NewUpdater()
-	err = updater.UpdateDependencies(packageJsonPath, outdated, shared.Options{})
+	err = applyTestUpdate(packageJsonPath, outdated, updater, shared.Options{})
 	if err != nil {
 		t.Fatalf("Failed to update package.json: %v", err)
 	}
@@ -361,7 +426,7 @@ func TestUpdatePreservesAllContent(t *testing.T) {
 
 	// Update the dependencies
 	updater := NewUpdater()
-	err = updater.UpdateDependencies(testFile, outdatedDependencies, shared.Options{})
+	err = applyTestUpdate(testFile, outdatedDependencies, updater, shared.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -618,7 +683,7 @@ func TestUpdateScopedPackages(t *testing.T) {
 	}
 
 	updater := NewUpdater()
-	err = updater.UpdateDependencies(packageJsonPath, outdated, shared.Options{})
+	err = applyTestUpdate(packageJsonPath, outdated, updater, shared.Options{})
 	if err != nil {
 		t.Fatalf("Failed to update package.json: %v", err)
 	}
@@ -850,6 +915,97 @@ func TestGetAuthTokenForRegistry(t *testing.T) {
 	}
 }
 
+func TestGetAuthTokenForRegistryUsesLongestPathPrefix(t *testing.T) {
+	config := &NpmConfig{AuthTokens: map[string]string{
+		"company.jfrog.io":                                     "host-token",
+		"company.jfrog.io/artifactory/api/npm":                 "npm-token",
+		"company.jfrog.io/artifactory/api/npm/npm-local":       "local-token",
+		"company.jfrog.io/artifactory/api/npm/npm-local-extra": "wrong-token",
+	}}
+
+	token := getAuthTokenForRegistry("https://company.jfrog.io/artifactory/api/npm/npm-local", config)
+	if token != "local-token" {
+		t.Fatalf("token = %q, expected longest path-scoped token", token)
+	}
+	token = getAuthTokenForRegistry("https://company.jfrog.io/artifactory/api/npm/other", config)
+	if token != "npm-token" {
+		t.Fatalf("token = %q, expected parent path token", token)
+	}
+}
+
+func TestRegistryClientSendsPathScopedAuthToken(t *testing.T) {
+	var receivedAuthorization string
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		receivedAuthorization = request.Header.Get("Authorization")
+		response.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(response, `{"dist-tags":{"latest":"1.2.3"}}`)
+	}))
+	defer server.Close()
+
+	projectDirectory := t.TempDir()
+	registryURL := server.URL + "/artifactory/api/npm/npm-local"
+	authKey := strings.TrimPrefix(server.URL, "http://") + "/artifactory/api/npm/npm-local"
+	npmrc := "//" + authKey + "/:_authToken=path-token\n"
+	if err := os.WriteFile(filepath.Join(projectDirectory, ".npmrc"), []byte(npmrc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := NewRegistryClient()
+	client.ConfigDirectory = projectDirectory
+	latest, err := client.GetLatestVersionFromRegistry(context.Background(), "example", registryURL, shared.Options{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest != "1.2.3" || receivedAuthorization != "Bearer path-token" {
+		t.Fatalf("latest = %q, authorization = %q", latest, receivedAuthorization)
+	}
+}
+
+func TestRegistryClientUsesConfiguredProjectDirectory(t *testing.T) {
+	projectDirectory := t.TempDir()
+	emptyHome := t.TempDir()
+	t.Setenv("HOME", emptyHome)
+
+	localNpmrc := "@company:registry=https://packages.company.test/npm\n"
+	if err := os.WriteFile(filepath.Join(projectDirectory, ".npmrc"), []byte(localNpmrc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	client := NewRegistryClient()
+	client.ConfigDirectory = projectDirectory
+	registryURL, _, err := client.resolveRegistryURL("@company/core", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if registryURL != "https://packages.company.test/npm" {
+		t.Fatalf("registry URL = %q, expected project-local registry", registryURL)
+	}
+}
+
+func TestRegistryClientCachesNpmConfiguration(t *testing.T) {
+	projectDirectory := t.TempDir()
+	t.Setenv("HOME", t.TempDir())
+	npmrcPath := filepath.Join(projectDirectory, ".npmrc")
+	if err := os.WriteFile(npmrcPath, []byte("@company:registry=https://first.example.test/npm\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := NewRegistryClient()
+	client.ConfigDirectory = projectDirectory
+	first, _, err := client.resolveRegistryURL("@company/core", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(npmrcPath, []byte("@company:registry=https://second.example.test/npm\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	second, _, err := client.resolveRegistryURL("@company/core", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != "https://first.example.test/npm" || second != first {
+		t.Fatalf("registry URLs = (%q, %q), expected cached first value", first, second)
+	}
+}
+
 // TestUpdateDuplicateDependenciesWithDifferentConstraints tests that when the same
 // dependency appears in multiple sections with different semver constraints,
 // each section preserves its own constraint prefix
@@ -905,7 +1061,7 @@ func TestUpdateDuplicateDependenciesWithDifferentConstraints(t *testing.T) {
 	}
 
 	updater := NewUpdater()
-	err = updater.UpdateDependencies(testFile, outdatedDependencies, shared.Options{IncludePeerDependencies: true})
+	err = applyTestUpdate(testFile, outdatedDependencies, updater, shared.Options{IncludePeerDependencies: true})
 	if err != nil {
 		t.Fatal(err)
 	}

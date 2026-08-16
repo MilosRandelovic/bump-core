@@ -4,11 +4,10 @@ import (
 	"bufio"
 	"fmt"
 	"maps"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/MilosRandelovic/bump-core/shared"
 )
 
 // NpmConfig holds the parsed .npmrc configuration
@@ -137,12 +136,38 @@ func getRegistryForPackage(packageName string, npmrcConfig *NpmConfig) string {
 
 // getAuthTokenForRegistry finds the appropriate auth token for a registry URL
 func getAuthTokenForRegistry(registryURL string, npmrcConfig *NpmConfig) string {
-	// Extract hostname from registry URL for matching
-	hostname := shared.ExtractHostname(registryURL)
-
-	if token, exists := npmrcConfig.AuthTokens[hostname]; exists {
-		return token
+	target := normalizeRegistryAuthKey(registryURL)
+	longestMatch := ""
+	matchedToken := ""
+	for configuredRegistry, token := range npmrcConfig.AuthTokens {
+		candidate := normalizeRegistryAuthKey(configuredRegistry)
+		if candidate == "" {
+			continue
+		}
+		if target != candidate && !strings.HasPrefix(target, candidate+"/") {
+			continue
+		}
+		if len(candidate) > len(longestMatch) {
+			longestMatch = candidate
+			matchedToken = token
+		}
 	}
+	return matchedToken
+}
 
-	return ""
+func normalizeRegistryAuthKey(registry string) string {
+	registry = strings.TrimSpace(registry)
+	if registry == "" {
+		return ""
+	}
+	if strings.HasPrefix(registry, "//") {
+		registry = "https:" + registry
+	} else if !strings.Contains(registry, "://") {
+		registry = "https://" + registry
+	}
+	parsed, err := url.Parse(registry)
+	if err != nil || parsed.Host == "" {
+		return ""
+	}
+	return strings.ToLower(parsed.Host) + strings.TrimRight(parsed.EscapedPath(), "/")
 }

@@ -9,19 +9,28 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/MilosRandelovic/bump-core/shared"
+	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
 
 // RegistryClient handles npm registry operations
 type RegistryClient struct {
-	Log shared.LogFunc
+	Log             shared.LogFunc
+	ConfigDirectory string
+	configOnce      sync.Once
+	config          *NpmConfig
+	configErr       error
 }
 
-func (client *RegistryClient) log(format string, args ...any) {
-	if client.Log != nil {
-		client.Log(format, args...)
+func (client *RegistryClient) log(ctx context.Context, format string, args ...any) {
+	log := shared.LogFromContext(ctx)
+	if log == nil {
+		log = client.Log
+	}
+	if log != nil {
+		log(format, args...)
 	}
 }
 
@@ -40,7 +49,7 @@ func NewRegistryClient() *RegistryClient {
 }
 
 // GetLatestVersionFromRegistry fetches the latest version from a specific registry
-func (client *RegistryClient) GetLatestVersionFromRegistry(ctx context.Context, packageName, registryURL string, options shared.Options, cache *shared.Cache) (string, error) {
+func (client *RegistryClient) GetLatestVersionFromRegistry(ctx context.Context, packageName, registryURL string, _ shared.Options, cache *shared.Cache) (string, error) {
 	targetRegistryURL, npmrcConfig, err := client.resolveRegistryURL(packageName, registryURL)
 	if err != nil {
 		return "", err
@@ -50,12 +59,12 @@ func (client *RegistryClient) GetLatestVersionFromRegistry(ctx context.Context, 
 	if cache != nil {
 		key := shared.GenerateCacheKey(packageName, "npm", targetRegistryURL, "", "*")
 		if entry, ok := cache.Get(key); ok {
-			client.log("Cache hit: %s\n", packageName)
+			client.log(ctx, "Cache hit: %s\n", packageName)
 			return entry.AbsoluteLatest, nil
 		}
 	}
 
-	body, err := client.fetchPackageInfo(ctx, packageName, targetRegistryURL, npmrcConfig, options)
+	body, err := client.fetchPackageInfo(ctx, packageName, targetRegistryURL, npmrcConfig)
 	if err != nil {
 		return "", err
 	}
@@ -87,7 +96,7 @@ func (client *RegistryClient) GetLatestVersionFromRegistry(ctx context.Context, 
 }
 
 // GetBothLatestVersions fetches both the absolute latest version and the latest version satisfying a constraint
-func (client *RegistryClient) GetBothLatestVersions(ctx context.Context, packageName, constraint, registryURL string, options shared.Options, cache *shared.Cache) (string, string, error) {
+func (client *RegistryClient) GetBothLatestVersions(ctx context.Context, packageName, constraint, registryURL string, _ shared.Options, cache *shared.Cache) (string, string, error) {
 	targetRegistryURL, npmrcConfig, err := client.resolveRegistryURL(packageName, registryURL)
 	if err != nil {
 		return "", "", err
@@ -97,12 +106,12 @@ func (client *RegistryClient) GetBothLatestVersions(ctx context.Context, package
 	if cache != nil {
 		key := shared.GenerateCacheKey(packageName, "npm", targetRegistryURL, "", constraint)
 		if entry, ok := cache.Get(key); ok {
-			client.log("Cache hit: %s\n", packageName)
+			client.log(ctx, "Cache hit: %s\n", packageName)
 			return entry.AbsoluteLatest, entry.ConstraintLatest, nil
 		}
 	}
 
-	body, err := client.fetchPackageInfo(ctx, packageName, targetRegistryURL, npmrcConfig, options)
+	body, err := client.fetchPackageInfo(ctx, packageName, targetRegistryURL, npmrcConfig)
 	if err != nil {
 		return "", "", err
 	}
@@ -123,7 +132,7 @@ func (client *RegistryClient) GetBothLatestVersions(ctx context.Context, package
 
 	absoluteLatest, constraintLatest, err := shared.FindBothLatestVersions(versions, constraint)
 	if err != nil {
-		return "", "", err
+		return absoluteLatest, constraintLatest, err
 	}
 
 	// Cache the result if cache is enabled
@@ -145,16 +154,26 @@ func (client *RegistryClient) GetBothLatestVersions(ctx context.Context, package
 }
 
 func (client *RegistryClient) resolveRegistryURL(packageName, registryURL string) (string, *NpmConfig, error) {
-	currentWorkingDir, err := os.Getwd()
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to get current directory: %w", err)
+	configDirectory := client.ConfigDirectory
+	if configDirectory == "" {
+		currentWorkingDir, err := os.Getwd()
+		if err != nil {
+			return "", nil, fmt.Errorf("failed to get current directory: %w", err)
+		}
+		configDirectory = currentWorkingDir
 	}
 
-	npmrcPath := filepath.Join(currentWorkingDir, ".npmrc")
-	npmrcConfig, err := parseNpmrcFiles(npmrcPath)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to parse .npmrc: %w", err)
+	client.configOnce.Do(func() {
+		npmrcPath := filepath.Join(configDirectory, ".npmrc")
+		client.config, client.configErr = parseNpmrcFiles(npmrcPath)
+		if client.configErr != nil {
+			client.configErr = fmt.Errorf("failed to parse .npmrc: %w", client.configErr)
+		}
+	})
+	if client.configErr != nil {
+		return "", nil, client.configErr
 	}
+	npmrcConfig := client.config
 
 	if registryURL != "" {
 		return registryURL, npmrcConfig, nil
@@ -164,10 +183,10 @@ func (client *RegistryClient) resolveRegistryURL(packageName, registryURL string
 }
 
 // fetchPackageInfo is a shared method to fetch package information from registries
-func (client *RegistryClient) fetchPackageInfo(ctx context.Context, packageName, targetRegistryURL string, npmrcConfig *NpmConfig, options shared.Options) ([]byte, error) {
+func (client *RegistryClient) fetchPackageInfo(ctx context.Context, packageName, targetRegistryURL string, npmrcConfig *NpmConfig) ([]byte, error) {
 	url := fmt.Sprintf("%s/%s", strings.TrimRight(targetRegistryURL, "/"), packageName)
 
-	client.log("Checking npm package: %s (registry: %s)\n", packageName, targetRegistryURL)
+	client.log(ctx, "Checking npm package: %s (registry: %s)\n", packageName, targetRegistryURL)
 
 	httpClient := &http.Client{Timeout: 10 * time.Second}
 	request, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -178,7 +197,7 @@ func (client *RegistryClient) fetchPackageInfo(ctx context.Context, packageName,
 	// Add authentication if available for this registry
 	if authToken := getAuthTokenForRegistry(targetRegistryURL, npmrcConfig); authToken != "" {
 		request.Header.Set("Authorization", "Bearer "+authToken)
-		client.log("Using authentication for registry: %s\n", targetRegistryURL)
+		client.log(ctx, "Using authentication for registry: %s\n", targetRegistryURL)
 	}
 
 	response, err := httpClient.Do(request)

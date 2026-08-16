@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"regexp"
 
-	"github.com/MilosRandelovic/bump-core/shared"
+	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
 
 // PatternProvider implements the pattern provider for npm package.json files
@@ -51,14 +51,6 @@ func (updater *Updater) GetRegistryType() shared.RegistryType {
 func (updater *Updater) ValidateOptions(options shared.Options) error {
 	// npm has no special option requirements
 	return nil
-}
-
-// UpdateDependencies updates dependencies in a file - thin wrapper for tests that delegates to shared logic
-func (updater *Updater) UpdateDependencies(filePath string, outdated []shared.OutdatedDependency, options shared.Options) error {
-	if err := updater.ValidateOptions(options); err != nil {
-		return err
-	}
-	return shared.UpdateDependenciesInFile(filePath, outdated, updater.GetPatternProvider(), options)
 }
 
 // Ensure Updater implements the interface
