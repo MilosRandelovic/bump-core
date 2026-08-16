@@ -99,7 +99,7 @@ Each input and output message occupies one JSON line. Request IDs are integers; 
 - `shared.Version` is the single source of truth for the release version.
 - Every release version must have an exact `## [x.y.z]` section in `CHANGELOG.md` before merging to `main`.
 - Major-version import paths must follow Go module rules; v2 imports include `/v2`.
-- The release workflow runs on pushes to `main`, rejects an existing tag, creates the tag and GitHub release, and then notifies `homebrew-bump`.
+- The release workflow runs on pushes to `main`, rejects an existing tag, creates the tag and GitHub release, and then opens a dependency-update pull request in `homebrew-bump`.
 - Workflow actions use current major-version tags such as `@v6`; keep them on the latest supported major.
 
 ## Verification
