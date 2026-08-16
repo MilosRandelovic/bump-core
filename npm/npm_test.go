@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
@@ -43,12 +44,78 @@ func TestRegistryClientPreservesAbsoluteLatestOnConstraintError(t *testing.T) {
 	}
 }
 
-func TestParsePackageJson(t *testing.T) {
-	// Create a temporary package.json file
-	tempDir := t.TempDir()
-	packageJsonPath := filepath.Join(tempDir, "package.json")
+func TestRegistryClientMinimumAgeSelectsNewestEligibleVersion(t *testing.T) {
+	now := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(response, `{
+			"dist-tags":{"latest":"2.0.0"},
+			"versions":{"1.0.0":{"version":"1.0.0"},"1.5.0":{"version":"1.5.0"},"1.8.0":{"version":"1.8.0","deprecated":"unsafe"},"1.9.0-beta.1":{"version":"1.9.0-beta.1"},"2.0.0":{"version":"2.0.0"}},
+			"time":{"1.0.0":%q,"1.5.0":%q,"1.8.0":%q,"1.9.0-beta.1":%q,"2.0.0":%q}
+		}`, now.Add(-72*time.Hour).Format(time.RFC3339), now.Add(-25*time.Hour).Format(time.RFC3339), now.Add(-30*time.Hour).Format(time.RFC3339), now.Add(-30*time.Hour).Format(time.RFC3339), now.Add(-time.Hour).Format(time.RFC3339))
+	}))
+	defer server.Close()
 
-	packageJsonContent := `{
+	client := NewRegistryClient()
+	client.ConfigDirectory = t.TempDir()
+	client.currentTime = func() time.Time { return now }
+	options := shared.Options{EnforceMinimumReleaseAge: true}
+
+	latest, err := client.GetLatestVersionFromRegistry(context.Background(), "example", server.URL, options, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest != "1.5.0" {
+		t.Fatalf("latest = %q, expected 1.5.0", latest)
+	}
+
+	absolute, compatible, err := client.GetBothLatestVersions(context.Background(), "example", "^1.0.0", server.URL, options, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if absolute != "1.5.0" || compatible != "1.5.0" {
+		t.Fatalf("versions = (%q, %q), expected (1.5.0, 1.5.0)", absolute, compatible)
+	}
+}
+
+func TestRegistryClientMinimumAgeReturnsNoCandidateWhenAllVersionsAreYoung(t *testing.T) {
+	now := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(response, `{"dist-tags":{"latest":"1.0.0"},"versions":{"1.0.0":{"version":"1.0.0"}},"time":{"1.0.0":%q}}`, now.Add(-time.Hour).Format(time.RFC3339))
+	}))
+	defer server.Close()
+
+	client := NewRegistryClient()
+	client.ConfigDirectory = t.TempDir()
+	client.currentTime = func() time.Time { return now }
+	_, err := client.GetLatestVersionFromRegistry(context.Background(), "example", server.URL, shared.Options{EnforceMinimumReleaseAge: true}, nil)
+	if !errors.Is(err, shared.ErrNoVersionsMeetMinimumReleaseAge) {
+		t.Fatalf("expected minimum-age error, got %v", err)
+	}
+}
+
+func TestRegistryClientMinimumAgeRejectsUnverifiableVersions(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(response, `{"dist-tags":{"latest":"1.0.0"},"versions":{"1.0.0":{"version":"1.0.0"}},"time":{}}`)
+	}))
+	defer server.Close()
+
+	client := NewRegistryClient()
+	client.ConfigDirectory = t.TempDir()
+	_, err := client.GetLatestVersionFromRegistry(context.Background(), "example", server.URL, shared.Options{EnforceMinimumReleaseAge: true}, nil)
+	if err == nil || !strings.Contains(err.Error(), "could not verify publication times") {
+		t.Fatalf("expected publication-time error, got %v", err)
+	}
+}
+
+func TestParsePackageJson(t *testing.T) {
+
+	tempDir := t.TempDir()
+	packageJSONPath := filepath.Join(tempDir, "package.json")
+
+	packageJSONContent := `{
 		"dependencies": {
 			"react": "^18.0.0",
 			"lodash": "~4.17.20"
@@ -61,13 +128,13 @@ func TestParsePackageJson(t *testing.T) {
 		}
 	}`
 
-	err := os.WriteFile(packageJsonPath, []byte(packageJsonContent), 0644)
+	err := os.WriteFile(packageJSONPath, []byte(packageJSONContent), 0644)
 	if err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
 	parser := NewParser()
-	dependencies, err := parser.ParseDependencies(packageJsonPath, shared.Options{})
+	dependencies, err := parser.ParseDependencies(packageJSONPath, shared.Options{})
 	if err != nil {
 		t.Fatalf("Failed to parse package.json: %v", err)
 	}
@@ -76,7 +143,6 @@ func TestParsePackageJson(t *testing.T) {
 		t.Errorf("Expected 3 dependencies, got %d", len(dependencies))
 	}
 
-	// Check specific dependencies - create maps for both clean and original versions
 	cleanVersionMap := make(map[string]string)
 	originalVersionMap := make(map[string]string)
 	for _, dependency := range dependencies {
@@ -84,7 +150,6 @@ func TestParsePackageJson(t *testing.T) {
 		originalVersionMap[dependency.Name] = dependency.OriginalVersion
 	}
 
-	// Check clean versions (without prefixes)
 	if cleanVersionMap["react"] != "18.0.0" {
 		t.Errorf("Expected react clean version '18.0.0', got '%s'", cleanVersionMap["react"])
 	}
@@ -97,7 +162,6 @@ func TestParsePackageJson(t *testing.T) {
 		t.Errorf("Expected typescript clean version '4.9.0', got '%s'", cleanVersionMap["typescript"])
 	}
 
-	// Check original versions (with prefixes)
 	if originalVersionMap["react"] != "^18.0.0" {
 		t.Errorf("Expected react original version '^18.0.0', got '%s'", originalVersionMap["react"])
 	}
@@ -143,11 +207,11 @@ func TestParseInvalidPackageJSONReturnsError(t *testing.T) {
 }
 
 func TestParsePeerDependencies(t *testing.T) {
-	// Create a temporary package.json file with only peer dependencies
-	tempDir := t.TempDir()
-	packageJsonPath := filepath.Join(tempDir, "package.json")
 
-	packageJsonContent := `{
+	tempDir := t.TempDir()
+	packageJSONPath := filepath.Join(tempDir, "package.json")
+
+	packageJSONContent := `{
 		"name": "test-package",
 		"version": "1.0.0",
 		"peerDependencies": {
@@ -158,13 +222,13 @@ func TestParsePeerDependencies(t *testing.T) {
 		}
 	}`
 
-	err := os.WriteFile(packageJsonPath, []byte(packageJsonContent), 0644)
+	err := os.WriteFile(packageJSONPath, []byte(packageJSONContent), 0644)
 	if err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
 	parser := NewParser()
-	dependencies, err := parser.ParseDependencies(packageJsonPath, shared.Options{IncludePeerDependencies: true})
+	dependencies, err := parser.ParseDependencies(packageJSONPath, shared.Options{IncludePeerDependencies: true})
 	if err != nil {
 		t.Fatalf("Failed to parse package.json: %v", err)
 	}
@@ -176,7 +240,6 @@ func TestParsePeerDependencies(t *testing.T) {
 		}
 	}
 
-	// Create maps for easier testing
 	cleanVersionMap := make(map[string]string)
 	originalVersionMap := make(map[string]string)
 	for _, dependency := range dependencies {
@@ -184,7 +247,6 @@ func TestParsePeerDependencies(t *testing.T) {
 		originalVersionMap[dependency.Name] = dependency.OriginalVersion
 	}
 
-	// Test peer dependency parsing
 	expectedDeps := map[string]struct {
 		cleanVersion    string
 		originalVersion string
@@ -206,11 +268,11 @@ func TestParsePeerDependencies(t *testing.T) {
 }
 
 func TestUpdatePackageJson(t *testing.T) {
-	// Create a temporary package.json file
-	tempDir := t.TempDir()
-	packageJsonPath := filepath.Join(tempDir, "package.json")
 
-	packageJsonContent := `{
+	tempDir := t.TempDir()
+	packageJSONPath := filepath.Join(tempDir, "package.json")
+
+	packageJSONContent := `{
   "dependencies": {
     "react": "^18.0.0",
     "lodash": "~4.17.20"
@@ -220,25 +282,22 @@ func TestUpdatePackageJson(t *testing.T) {
   }
 }`
 
-	err := os.WriteFile(packageJsonPath, []byte(packageJsonContent), 0644)
+	err := os.WriteFile(packageJSONPath, []byte(packageJSONContent), 0644)
 	if err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
-	// First, parse dependencies to get line numbers
 	parser := NewParser()
-	dependencies, err := parser.ParseDependencies(packageJsonPath, shared.Options{})
+	dependencies, err := parser.ParseDependencies(packageJSONPath, shared.Options{})
 	if err != nil {
 		t.Fatalf("Failed to parse package.json: %v", err)
 	}
 
-	// Create a map to look up line numbers
 	lineNumbers := make(map[string]int)
 	for _, dependency := range dependencies {
 		lineNumbers[dependency.Name] = dependency.LineNumber
 	}
 
-	// Mock outdated dependencies
 	outdated := []shared.OutdatedDependency{
 		{
 			BaseDependency: shared.BaseDependency{
@@ -265,20 +324,18 @@ func TestUpdatePackageJson(t *testing.T) {
 	}
 
 	updater := NewUpdater()
-	err = applyTestUpdate(packageJsonPath, outdated, updater, shared.Options{})
+	err = applyTestUpdate(packageJSONPath, outdated, updater, shared.Options{})
 	if err != nil {
 		t.Fatalf("Failed to update package.json: %v", err)
 	}
 
-	// Read and verify the updated file
-	updatedContent, err := os.ReadFile(packageJsonPath)
+	updatedContent, err := os.ReadFile(packageJSONPath)
 	if err != nil {
 		t.Fatalf("Failed to read updated file: %v", err)
 	}
 
 	updatedStr := string(updatedContent)
 
-	// Check that versions were updated correctly with prefixes preserved
 	if !strings.Contains(updatedStr, `"react": "^18.2.0"`) {
 		t.Errorf("React version not updated correctly, content: %s", updatedStr)
 	}
@@ -287,14 +344,13 @@ func TestUpdatePackageJson(t *testing.T) {
 		t.Errorf("Lodash version not updated correctly, content: %s", updatedStr)
 	}
 
-	// TypeScript should remain unchanged
 	if !strings.Contains(updatedStr, `"typescript": ">=4.9.0"`) {
 		t.Errorf("TypeScript version should not have changed, content: %s", updatedStr)
 	}
 }
 
 func TestUpdatePreservesAllContent(t *testing.T) {
-	// Realistic package.json content with scripts, metadata, config, and dependencies
+
 	originalContent := `{
   "name": "my-react-app",
   "version": "0.1.0",
@@ -377,17 +433,14 @@ func TestUpdatePreservesAllContent(t *testing.T) {
   }
 }`
 
-	// Create a temporary test file
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "package.json")
 
-	// Write the original content
 	err := os.WriteFile(testFile, []byte(originalContent), 0644)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Mock dependencies for update
 	outdatedDependencies := []shared.OutdatedDependency{
 		{
 			BaseDependency: shared.BaseDependency{
@@ -424,14 +477,12 @@ func TestUpdatePreservesAllContent(t *testing.T) {
 		},
 	}
 
-	// Update the dependencies
 	updater := NewUpdater()
 	err = applyTestUpdate(testFile, outdatedDependencies, updater, shared.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Read the updated content
 	updatedContent, err := os.ReadFile(testFile)
 	if err != nil {
 		t.Fatal(err)
@@ -439,7 +490,6 @@ func TestUpdatePreservesAllContent(t *testing.T) {
 
 	updatedStr := string(updatedContent)
 
-	// Verify that critical non-dependency content is preserved
 	criticalContent := []string{
 		`"name": "my-react-app"`,
 		`"version": "0.1.0"`,
@@ -495,7 +545,6 @@ func TestUpdatePreservesAllContent(t *testing.T) {
 		}
 	}
 
-	// Verify that dependencies were actually updated
 	expectedUpdates := map[string]string{
 		`"react": "^18.2.0"`:  "react version should be updated to 18.2.0",
 		`"axios": "^1.5.0"`:   "axios version should be updated to 1.5.0",
@@ -508,7 +557,6 @@ func TestUpdatePreservesAllContent(t *testing.T) {
 		}
 	}
 
-	// Verify that unchanged dependencies remain unchanged
 	unchangedDeps := []string{
 		`"react-dom": "^18.0.0"`,
 		`"lodash": "~4.17.20"`,
@@ -523,41 +571,21 @@ func TestUpdatePreservesAllContent(t *testing.T) {
 		}
 	}
 
-	// Note: PeerDependencies should remain unchanged by default.
-	// Only dependencies and devDependencies should be updated.
 	if !strings.Contains(updatedStr, `"react": "^18.2.0"`) {
 		t.Errorf("React dependency should be updated to ^18.2.0")
 	}
 
-	// Verify that peerDependencies remain unchanged
 	if !strings.Contains(updatedStr, `"react": ">=16.8.0"`) {
 		t.Errorf("PeerDependencies should remain unchanged when includePeerDependencies is false")
 	}
 }
 
-func TestGetFileType(t *testing.T) {
-	parser := NewParser()
-	if parser.GetRegistryType() != shared.Npm {
-		t.Errorf("Expected registry type Npm, got '%s'", parser.GetRegistryType().String())
-	}
-
-	updater := NewUpdater()
-	if updater.GetRegistryType() != shared.Npm {
-		t.Errorf("Expected registry type Npm, got '%s'", updater.GetRegistryType().String())
-	}
-
-	registry := NewRegistryClient()
-	if registry.GetRegistryType() != shared.Npm {
-		t.Errorf("Expected registry type Npm, got '%s'", registry.GetRegistryType().String())
-	}
-}
-
 func TestParseScopedPackages(t *testing.T) {
-	// Create a temporary package.json file with scoped packages
-	tempDir := t.TempDir()
-	packageJsonPath := filepath.Join(tempDir, "package.json")
 
-	packageJsonContent := `{
+	tempDir := t.TempDir()
+	packageJSONPath := filepath.Join(tempDir, "package.json")
+
+	packageJSONContent := `{
 		"dependencies": {
 			"react": "^18.0.0",
 			"@company/private-pkg": "^1.2.3",
@@ -573,18 +601,17 @@ func TestParseScopedPackages(t *testing.T) {
 		}
 	}`
 
-	err := os.WriteFile(packageJsonPath, []byte(packageJsonContent), 0644)
+	err := os.WriteFile(packageJSONPath, []byte(packageJSONContent), 0644)
 	if err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
 	parser := NewParser()
-	dependencies, err := parser.ParseDependencies(packageJsonPath, shared.Options{})
+	dependencies, err := parser.ParseDependencies(packageJSONPath, shared.Options{})
 	if err != nil {
 		t.Fatalf("Failed to parse package.json: %v", err)
 	}
 
-	// Should include 6 dependencies
 	if len(dependencies) != 6 {
 		t.Errorf("Expected 6 dependencies, got %d", len(dependencies))
 		for _, dependency := range dependencies {
@@ -592,7 +619,6 @@ func TestParseScopedPackages(t *testing.T) {
 		}
 	}
 
-	// Create maps for easier testing
 	cleanVersionMap := make(map[string]string)
 	originalVersionMap := make(map[string]string)
 	for _, dependency := range dependencies {
@@ -600,7 +626,6 @@ func TestParseScopedPackages(t *testing.T) {
 		originalVersionMap[dependency.Name] = dependency.OriginalVersion
 	}
 
-	// Test scoped package parsing
 	expectedDeps := map[string]struct {
 		cleanVersion    string
 		originalVersion string
@@ -624,11 +649,11 @@ func TestParseScopedPackages(t *testing.T) {
 }
 
 func TestUpdateScopedPackages(t *testing.T) {
-	// Create a temporary package.json file with scoped packages
-	tempDir := t.TempDir()
-	packageJsonPath := filepath.Join(tempDir, "package.json")
 
-	packageJsonContent := `{
+	tempDir := t.TempDir()
+	packageJSONPath := filepath.Join(tempDir, "package.json")
+
+	packageJSONContent := `{
   "dependencies": {
     "react": "^18.0.0",
     "@company/private-pkg": "^1.2.3",
@@ -640,12 +665,11 @@ func TestUpdateScopedPackages(t *testing.T) {
   }
 }`
 
-	err := os.WriteFile(packageJsonPath, []byte(packageJsonContent), 0644)
+	err := os.WriteFile(packageJSONPath, []byte(packageJSONContent), 0644)
 	if err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
-	// Mock outdated scoped dependencies
 	outdated := []shared.OutdatedDependency{
 		{
 			BaseDependency: shared.BaseDependency{
@@ -683,20 +707,18 @@ func TestUpdateScopedPackages(t *testing.T) {
 	}
 
 	updater := NewUpdater()
-	err = applyTestUpdate(packageJsonPath, outdated, updater, shared.Options{})
+	err = applyTestUpdate(packageJSONPath, outdated, updater, shared.Options{})
 	if err != nil {
 		t.Fatalf("Failed to update package.json: %v", err)
 	}
 
-	// Read and verify the updated file
-	updatedContent, err := os.ReadFile(packageJsonPath)
+	updatedContent, err := os.ReadFile(packageJSONPath)
 	if err != nil {
 		t.Fatalf("Failed to read updated file: %v", err)
 	}
 
 	updatedStr := string(updatedContent)
 
-	// Check that scoped packages were updated correctly with prefixes preserved
 	expectedUpdates := map[string]string{
 		`"@company/private-pkg": "^1.3.0"`: "@company/private-pkg should be updated to ^1.3.0",
 		`"@angular/core": "^16.2.0"`:       "@angular/core should be updated to ^16.2.0",
@@ -709,7 +731,6 @@ func TestUpdateScopedPackages(t *testing.T) {
 		}
 	}
 
-	// Verify unchanged dependencies
 	if !strings.Contains(updatedStr, `"react": "^18.0.0"`) {
 		t.Errorf("React version should not have changed")
 	}
@@ -719,7 +740,7 @@ func TestUpdateScopedPackages(t *testing.T) {
 }
 
 func TestParseNpmrcFile(t *testing.T) {
-	// Create a temporary .npmrc file
+
 	tempDir := t.TempDir()
 	npmrcPath := filepath.Join(tempDir, ".npmrc")
 
@@ -748,7 +769,6 @@ registry=https://registry.npmjs.org/
 		t.Fatalf("Failed to parse .npmrc file: %v", err)
 	}
 
-	// Test scope registries
 	expectedScopeRegistries := map[string]string{
 		"@company":  "https://npm.company.com",
 		"@internal": "https://internal-registry.example.com/",
@@ -762,7 +782,6 @@ registry=https://registry.npmjs.org/
 		}
 	}
 
-	// Test auth tokens (should strip quotes)
 	expectedAuthTokens := map[string]string{
 		"npm.company.com":               "company_token_123",
 		"internal-registry.example.com": "internal_token_456",
@@ -779,7 +798,7 @@ registry=https://registry.npmjs.org/
 }
 
 func TestParseNpmrcFilesWithGlobalAndLocal(t *testing.T) {
-	// Create temporary directories
+
 	tempDir := t.TempDir()
 	homeDir := filepath.Join(tempDir, "home")
 	projectDir := filepath.Join(tempDir, "project")
@@ -793,7 +812,6 @@ func TestParseNpmrcFilesWithGlobalAndLocal(t *testing.T) {
 		t.Fatalf("Failed to create project directory: %v", err)
 	}
 
-	// Create global .npmrc (in home directory)
 	globalNpmrcPath := filepath.Join(homeDir, ".npmrc")
 	globalNpmrcContent := `@company:registry=https://global.company.com
 //global.company.com/:_authToken=global_token
@@ -804,7 +822,6 @@ func TestParseNpmrcFilesWithGlobalAndLocal(t *testing.T) {
 		t.Fatalf("Failed to create global .npmrc file: %v", err)
 	}
 
-	// Create local .npmrc (in project directory)
 	localNpmrcPath := filepath.Join(projectDir, ".npmrc")
 	localNpmrcContent := `@company:registry=https://local.company.com
 @internal:registry=https://internal.example.com
@@ -816,45 +833,38 @@ func TestParseNpmrcFilesWithGlobalAndLocal(t *testing.T) {
 		t.Fatalf("Failed to create local .npmrc file: %v", err)
 	}
 
-	// Set HOME environment variable temporarily
 	originalHome := os.Getenv("HOME")
 	defer os.Setenv("HOME", originalHome)
 	os.Setenv("HOME", homeDir)
 
-	// Test parseNpmrcFiles function
 	config, err := parseNpmrcFiles(localNpmrcPath)
 	if err != nil {
 		t.Fatalf("Failed to parse .npmrc files: %v", err)
 	}
 
-	// Local scope registries should override global ones
 	if config.ScopeRegistries["@company"] != "https://local.company.com" {
 		t.Errorf("Expected local @company registry to override global, got '%s'", config.ScopeRegistries["@company"])
 	}
 
-	// Local-only scope registries should be present
 	if config.ScopeRegistries["@internal"] != "https://internal.example.com" {
 		t.Errorf("Expected @internal registry to be '%s', got '%s'", "https://internal.example.com", config.ScopeRegistries["@internal"])
 	}
 
-	// Local auth tokens should override global ones
 	if config.AuthTokens["shared-registry.com"] != "local_shared_token" {
 		t.Errorf("Expected local shared token to override global, got '%s'", config.AuthTokens["shared-registry.com"])
 	}
 
-	// Local-only auth tokens should be present
 	if config.AuthTokens["local.company.com"] != "local_token" {
 		t.Errorf("Expected local.company.com token to be 'local_token', got '%s'", config.AuthTokens["local.company.com"])
 	}
 
-	// Global-only auth tokens should be present
 	if config.AuthTokens["global.company.com"] != "global_token" {
 		t.Errorf("Expected global.company.com token to be 'global_token', got '%s'", config.AuthTokens["global.company.com"])
 	}
 }
 
 func TestGetRegistryForPackage(t *testing.T) {
-	config := &NpmConfig{
+	config := &npmConfig{
 		ScopeRegistries: map[string]string{
 			"@company":  "https://npm.company.com",
 			"@internal": "https://internal-registry.example.com",
@@ -885,7 +895,7 @@ func TestGetRegistryForPackage(t *testing.T) {
 }
 
 func TestGetAuthTokenForRegistry(t *testing.T) {
-	config := &NpmConfig{
+	config := &npmConfig{
 		ScopeRegistries: map[string]string{},
 		AuthTokens: map[string]string{
 			"npm.company.com":      "company_token",
@@ -903,7 +913,7 @@ func TestGetAuthTokenForRegistry(t *testing.T) {
 		{"https://registry.example.com", "example_token"},
 		{"https://internal.corp.com/npm", "internal_token"},
 		{"https://unknown-registry.com", ""},
-		{"http://npm.company.com", "company_token"}, // Same hostname, same token regardless of protocol
+		{"http://npm.company.com", "company_token"},
 	}
 
 	for _, test := range tests {
@@ -916,7 +926,7 @@ func TestGetAuthTokenForRegistry(t *testing.T) {
 }
 
 func TestGetAuthTokenForRegistryUsesLongestPathPrefix(t *testing.T) {
-	config := &NpmConfig{AuthTokens: map[string]string{
+	config := &npmConfig{AuthTokens: map[string]string{
 		"company.jfrog.io":                                     "host-token",
 		"company.jfrog.io/artifactory/api/npm":                 "npm-token",
 		"company.jfrog.io/artifactory/api/npm/npm-local":       "local-token",
@@ -981,7 +991,7 @@ func TestRegistryClientUsesConfiguredProjectDirectory(t *testing.T) {
 	}
 }
 
-func TestRegistryClientCachesNpmConfiguration(t *testing.T) {
+func TestRegistryClientCachesNPMConfiguration(t *testing.T) {
 	projectDirectory := t.TempDir()
 	t.Setenv("HOME", t.TempDir())
 	npmrcPath := filepath.Join(projectDirectory, ".npmrc")
@@ -1006,11 +1016,8 @@ func TestRegistryClientCachesNpmConfiguration(t *testing.T) {
 	}
 }
 
-// TestUpdateDuplicateDependenciesWithDifferentConstraints tests that when the same
-// dependency appears in multiple sections with different semver constraints,
-// each section preserves its own constraint prefix
 func TestUpdateDuplicateDependenciesWithDifferentConstraints(t *testing.T) {
-	packageJsonContent := `{
+	packageJSONContent := `{
   "name": "test-package",
   "version": "1.0.0",
   "dependencies": {
@@ -1024,17 +1031,14 @@ func TestUpdateDuplicateDependenciesWithDifferentConstraints(t *testing.T) {
   }
 }`
 
-	// Create a temporary test file
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "package.json")
 
-	// Write the original content
-	err := os.WriteFile(testFile, []byte(packageJsonContent), 0644)
+	err := os.WriteFile(testFile, []byte(packageJSONContent), 0644)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Update both react dependencies (one in dependencies, one in peerDependencies)
 	outdatedDependencies := []shared.OutdatedDependency{
 		{
 			BaseDependency: shared.BaseDependency{
@@ -1066,7 +1070,6 @@ func TestUpdateDuplicateDependenciesWithDifferentConstraints(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Read the updated content
 	updatedContent, err := os.ReadFile(testFile)
 	if err != nil {
 		t.Fatal(err)
@@ -1074,17 +1077,14 @@ func TestUpdateDuplicateDependenciesWithDifferentConstraints(t *testing.T) {
 
 	updatedStr := string(updatedContent)
 
-	// Verify that dependencies section has caret constraint preserved
 	if !strings.Contains(updatedStr, `"react": "^18.2.0"`) {
 		t.Errorf("Expected react in dependencies to be updated to '^18.2.0' with caret constraint preserved")
 	}
 
-	// Verify that peerDependencies section has >= constraint preserved
 	if !strings.Contains(updatedStr, `"react": ">=18.2.0"`) {
 		t.Errorf("Expected react in peerDependencies to be updated to '>=18.2.0' with >= constraint preserved")
 	}
 
-	// Verify both sections exist and have different versions
 	dependenciesMatch := strings.Contains(updatedStr, `"dependencies": {
     "react": "^18.2.0"
   }`)
@@ -1101,7 +1101,7 @@ func TestUpdateDuplicateDependenciesWithDifferentConstraints(t *testing.T) {
 }
 
 func TestMonorepoWorkspaceDetection(t *testing.T) {
-	// Create temporary directory structure for monorepo
+
 	rootDir := t.TempDir()
 	packagesDir := filepath.Join(rootDir, "packages")
 	packageADir := filepath.Join(packagesDir, "package-a")
@@ -1114,7 +1114,6 @@ func TestMonorepoWorkspaceDetection(t *testing.T) {
 		t.Fatalf("Failed to create package-b directory: %v", err)
 	}
 
-	// Create root package.json with workspaces
 	rootPackageJSON := `{
   "name": "root",
   "private": true,
@@ -1128,7 +1127,6 @@ func TestMonorepoWorkspaceDetection(t *testing.T) {
 		t.Fatalf("Failed to create root package.json: %v", err)
 	}
 
-	// Create package-a/package.json
 	packageAJSON := `{
   "name": "package-a",
   "dependencies": {
@@ -1140,7 +1138,6 @@ func TestMonorepoWorkspaceDetection(t *testing.T) {
 		t.Fatalf("Failed to create package-a/package.json: %v", err)
 	}
 
-	// Create package-b/package.json
 	packageBJSON := `{
   "name": "package-b",
   "dependencies": {
@@ -1152,25 +1149,21 @@ func TestMonorepoWorkspaceDetection(t *testing.T) {
 		t.Fatalf("Failed to create package-b/package.json: %v", err)
 	}
 
-	// Parse with monorepo flag enabled
 	parser := NewParser()
 	dependencies, err := parser.ParseDependencies(rootPath, shared.Options{Monorepo: true})
 	if err != nil {
 		t.Fatalf("Failed to parse monorepo: %v", err)
 	}
 
-	// Should find dependencies from all three package.json files
 	if len(dependencies) != 3 {
 		t.Errorf("Expected 3 dependencies, got %d", len(dependencies))
 	}
 
-	// Verify dependencies and their FilePath
 	dependencyMap := make(map[string]shared.Dependency)
 	for _, dependency := range dependencies {
 		dependencyMap[dependency.Name] = dependency
 	}
 
-	// Check lodash from root
 	if lodash, ok := dependencyMap["lodash"]; ok {
 		if lodash.FilePath != rootPath {
 			t.Errorf("lodash FilePath = %s, want %s", lodash.FilePath, rootPath)
@@ -1182,7 +1175,6 @@ func TestMonorepoWorkspaceDetection(t *testing.T) {
 		t.Error("lodash dependency not found")
 	}
 
-	// Check react from package-a
 	if react, ok := dependencyMap["react"]; ok {
 		if react.FilePath != packageAPath {
 			t.Errorf("react FilePath = %s, want %s", react.FilePath, packageAPath)
@@ -1194,7 +1186,6 @@ func TestMonorepoWorkspaceDetection(t *testing.T) {
 		t.Error("react dependency not found")
 	}
 
-	// Check axios from package-b
 	if axios, ok := dependencyMap["axios"]; ok {
 		if axios.FilePath != packageBPath {
 			t.Errorf("axios FilePath = %s, want %s", axios.FilePath, packageBPath)
@@ -1208,9 +1199,9 @@ func TestMonorepoWorkspaceDetection(t *testing.T) {
 }
 
 func TestMonorepoWithoutWorkspaces(t *testing.T) {
-	// Create a package.json without workspaces field
+
 	tempDir := t.TempDir()
-	packageJsonPath := filepath.Join(tempDir, "package.json")
+	packageJSONPath := filepath.Join(tempDir, "package.json")
 
 	packageJSON := `{
   "name": "regular-project",
@@ -1219,18 +1210,16 @@ func TestMonorepoWithoutWorkspaces(t *testing.T) {
   }
 }`
 
-	if err := os.WriteFile(packageJsonPath, []byte(packageJSON), 0644); err != nil {
+	if err := os.WriteFile(packageJSONPath, []byte(packageJSON), 0644); err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
-	// Parse with monorepo flag enabled but no workspaces field
 	parser := NewParser()
-	dependencies, err := parser.ParseDependencies(packageJsonPath, shared.Options{Monorepo: true})
+	dependencies, err := parser.ParseDependencies(packageJSONPath, shared.Options{Monorepo: true})
 	if err != nil {
 		t.Fatalf("Failed to parse package.json: %v", err)
 	}
 
-	// Should only find dependencies from the single file
 	if len(dependencies) != 1 {
 		t.Errorf("Expected 1 dependency, got %d", len(dependencies))
 	}
@@ -1239,13 +1228,13 @@ func TestMonorepoWithoutWorkspaces(t *testing.T) {
 		t.Errorf("Expected lodash, got %s", dependencies[0].Name)
 	}
 
-	if dependencies[0].FilePath != packageJsonPath {
-		t.Errorf("FilePath = %s, want %s", dependencies[0].FilePath, packageJsonPath)
+	if dependencies[0].FilePath != packageJSONPath {
+		t.Errorf("FilePath = %s, want %s", dependencies[0].FilePath, packageJSONPath)
 	}
 }
 
 func TestMonorepoGlobPatterns(t *testing.T) {
-	// Create temporary directory structure with multiple patterns
+
 	rootDir := t.TempDir()
 	appsDir := filepath.Join(rootDir, "apps")
 	libsDir := filepath.Join(rootDir, "libs")
@@ -1259,7 +1248,6 @@ func TestMonorepoGlobPatterns(t *testing.T) {
 		t.Fatalf("Failed to create utils directory: %v", err)
 	}
 
-	// Create root package.json with multiple workspace patterns
 	rootPackageJSON := `{
   "name": "monorepo",
   "workspaces": ["apps/*", "libs/*"],
@@ -1272,7 +1260,6 @@ func TestMonorepoGlobPatterns(t *testing.T) {
 		t.Fatalf("Failed to create root package.json: %v", err)
 	}
 
-	// Create apps/web/package.json
 	webJSON := `{
   "name": "web",
   "dependencies": {
@@ -1284,7 +1271,6 @@ func TestMonorepoGlobPatterns(t *testing.T) {
 		t.Fatalf("Failed to create web/package.json: %v", err)
 	}
 
-	// Create libs/utils/package.json
 	utilsJSON := `{
   "name": "utils",
   "dependencies": {
@@ -1296,19 +1282,16 @@ func TestMonorepoGlobPatterns(t *testing.T) {
 		t.Fatalf("Failed to create utils/package.json: %v", err)
 	}
 
-	// Parse with monorepo flag enabled
 	parser := NewParser()
 	dependencies, err := parser.ParseDependencies(rootPath, shared.Options{Monorepo: true})
 	if err != nil {
 		t.Fatalf("Failed to parse monorepo: %v", err)
 	}
 
-	// Should find dependencies from all three locations
 	if len(dependencies) != 3 {
 		t.Errorf("Expected 3 dependencies, got %d", len(dependencies))
 	}
 
-	// Verify all dependencies are from correct files
 	dependencyMap := make(map[string]string)
 	for _, dependency := range dependencies {
 		dependencyMap[dependency.Name] = dependency.FilePath
@@ -1338,7 +1321,6 @@ func TestWorkspaceDependenciesSkipped(t *testing.T) {
 		t.Fatalf("Failed to create package-b directory: %v", err)
 	}
 
-	// Create root package.json with workspaces
 	rootPackageJSON := `{
   "name": "monorepo-root",
   "private": true,
@@ -1349,7 +1331,6 @@ func TestWorkspaceDependenciesSkipped(t *testing.T) {
 		t.Fatalf("Failed to create root package.json: %v", err)
 	}
 
-	// Create package-a with external dependency
 	packageAJSON := `{
   "name": "@monorepo/package-a",
   "dependencies": {
@@ -1361,7 +1342,6 @@ func TestWorkspaceDependenciesSkipped(t *testing.T) {
 		t.Fatalf("Failed to create package-a/package.json: %v", err)
 	}
 
-	// Create package-b with workspace dependency (*)
 	packageBJSON := `{
   "name": "@monorepo/package-b",
   "dependencies": {
@@ -1374,14 +1354,12 @@ func TestWorkspaceDependenciesSkipped(t *testing.T) {
 		t.Fatalf("Failed to create package-b/package.json: %v", err)
 	}
 
-	// Parse with monorepo flag enabled
 	parser := NewParser()
 	dependencies, err := parser.ParseDependencies(rootPath, shared.Options{Monorepo: true})
 	if err != nil {
 		t.Fatalf("Failed to parse monorepo: %v", err)
 	}
 
-	// Verify workspace dependency with * is included in parsing
 	foundWorkspaceDep := false
 	foundLodash := false
 	foundAxios := false
@@ -1503,7 +1481,6 @@ func TestMonorepoBestEffortOnInvalidWorkspacePackage(t *testing.T) {
 		t.Fatalf("Failed to create good workspace package.json: %v", err)
 	}
 
-	// Invalid JSON in one workspace package should not abort whole parse in best-effort mode.
 	if err := os.WriteFile(filepath.Join(badPackageDir, "package.json"), []byte(`{"dependencies": {"broken": }}`), 0644); err != nil {
 		t.Fatalf("Failed to create bad workspace package.json: %v", err)
 	}

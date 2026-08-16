@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.1.0]
+
+- Add a fixed 24-hour minimum release age for npm and Pub version suggestions
+- Keep age-filtered registry results separate in the cache and expire them when the next release becomes eligible
+- Expose minimum-age checks through the sidecar protocol without allowing version downgrades
+- Preserve dependency input order, stop scheduling work after cancellation, and report per-file and overall progress through library and sidecar APIs
+- Make dependency updates context-aware, serialize them across processes, and reject duplicate active IDs for cancel requests
+- Reject invalid dependency types and update patterns without panicking or modifying files
+- Use idiomatic Go API names and keep registry configuration details internal to their ecosystem packages
+
 ## [2.0.0]
 
 - Fix compound and disjunctive semver constraint evaluation and updates

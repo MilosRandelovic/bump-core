@@ -31,12 +31,17 @@ shared/               Shared types, cache, version helpers, file updates, and lo
 ## Public API Conventions
 
 - Functions that accept configuration use `shared.Options`; do not add parallel boolean parameters.
+- Name every parameter in callable signatures, including function types and injected callbacks. Never use bare positional type lists that force readers to infer what repeated types such as `string` represent.
 - Long-running registry checks accept `context.Context` and must propagate cancellation through HTTP requests and worker orchestration.
+- Dependency-check progress uses `shared.ProgressFunc`; it reports per-file and overall counts while results and verbose logs retain input order.
 - Optional diagnostics use `shared.LogFunc`. Check for nil before calling it.
 - Parser and registry-client structs expose a `Log` field and internal `log` helper. Concurrent registry operations can carry an operation-specific logger through `shared.ContextWithLog`/`shared.LogFromContext`.
 - `parser.ParseDependencies` is the quiet convenience API; `parser.ParseDependenciesWithLog` is used when diagnostics are required.
 - Constraint mismatches belong in `SemverSkipped`, not `Errors`.
+- `Options.EnforceMinimumReleaseAge` only permits npm and Pub suggestions published more than 24 hours ago. It must never cause a downgrade, and the age is not configurable.
 - Wrap operational errors with context using `fmt.Errorf("context: %w", err)`.
+- Use concise, idiomatic Go names. Keep conventional or immediately obvious abbreviations such as `ctx`, `err`, `ok`, `i`, `t`, `max`, `min`, `args`, `config`, and `info`; expand abbreviations whose meaning is unclear from their scope and domain.
+- Do not add comments merely to narrate the code or document what changed. Keep comments for public API contracts and non-obvious intent.
 
 ## Sidecar Protocol
 
@@ -58,13 +63,14 @@ Each input and output message occupies one JSON line. Request IDs are integers; 
 {"type":"error","id":1,"error":"message"}
 {"type":"error","id":9,"code":"request_limit_exceeded","error":"too many active requests (maximum 8)"}
 {"type":"log","id":2,"message":"message"}
-{"type":"progress","id":2,"current":3,"total":10}
+{"type":"progress","id":2,"filePath":"/path/to/package.json","fileCurrent":3,"fileTotal":5,"current":8,"total":10}
 ```
 
 - `detect`, `check`, and `update` requests run concurrently.
 - At most eight regular requests may be active. Requests above the limit are rejected immediately with `request_limit_exceeded`; they are not queued.
 - `cancel` is handled by the reader loop and does not consume a request slot.
 - A duplicate active request ID is rejected.
+- Cancellation is checked before starting registry work and before dependency-update prepare/apply operations.
 - All writes go through the server's synchronized encoder. Never write unrelated content to sidecar stdout.
 - Keep logs, progress, cancellation, and terminal responses correlated with the originating request ID.
 
@@ -79,14 +85,15 @@ Each input and output message occupies one JSON line. Request IDs are integers; 
 
 - The persistent cache is versioned JSON stored at `~/.bump-cache`.
 - Cache keys include package name, dependency type, registry, current version, and constraint. Do not replace the structured JSON key with a delimiter-based key.
-- Persistence is serialized in-process. A save reloads and merges the current on-disk entries, removes expired entries, and atomically replaces the file with mode `0600`.
+- Minimum-age and unfiltered registry lookups use distinct cache identities. An age-filtered entry expires when the next release becomes eligible if that is sooner than the normal cache lifetime.
+- A save reloads and merges the current on-disk entries, removes expired entries, and atomically replaces the file with mode `0600`.
 - Non-JSON cache data is not parsed or carried forward. It is replaced by fresh cache data on a successful save.
 - An unsupported JSON cache version must return an error and must not be overwritten.
-- Cache and dependency-file locks are process-local. Do not describe them as cross-process synchronization.
+- Cache persistence is serialized in-process. Dependency-file transactions additionally use operating-system file locks so separate bump processes cannot overwrite one another's updates.
 
 ## Dependency Update Safety
 
-- `updater.UpdateDependencies` groups updates by file and locks canonical target paths for the entire prepare/apply transaction. Acquire multi-file locks in a deterministic order.
+- `updater.UpdateDependencies` groups updates by file and locks canonical target paths across goroutines and processes for the entire prepare/apply transaction. Acquire multi-file locks in a deterministic order.
 - Prepare and validate every target before writing the first file.
 - Validate the dependency line, original version, replacement version, and resulting semantic-version constraint. Treat changed source locations as stale input and fail safely.
 - Each file is replaced atomically using a same-directory temporary file and rename. A multi-file update is not transactional: if a later apply fails, earlier files remain updated.

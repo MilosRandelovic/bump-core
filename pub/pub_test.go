@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
@@ -42,8 +43,44 @@ func TestRegistryClientPreservesAbsoluteLatestOnConstraintError(t *testing.T) {
 	}
 }
 
+func TestRegistryClientMinimumAgeSelectsNewestEligibleVersion(t *testing.T) {
+	now := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(response, `{
+			"latest":{"version":"2.0.0"},
+			"versions":[
+				{"version":"1.0.0","published":%q},
+				{"version":"1.5.0","published":%q},
+				{"version":"2.0.0","published":%q}
+			]
+		}`, now.Add(-72*time.Hour).Format(time.RFC3339), now.Add(-25*time.Hour).Format(time.RFC3339), now.Add(-time.Hour).Format(time.RFC3339))
+	}))
+	defer server.Close()
+
+	client := NewRegistryClient()
+	client.currentTime = func() time.Time { return now }
+	options := shared.Options{EnforceMinimumReleaseAge: true}
+
+	latest, err := client.GetLatestVersionFromRegistry(context.Background(), "example", server.URL, options, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest != "1.5.0" {
+		t.Fatalf("latest = %q, expected 1.5.0", latest)
+	}
+
+	absolute, compatible, err := client.GetBothLatestVersions(context.Background(), "example", "^1.0.0", server.URL, options, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if absolute != "1.5.0" || compatible != "1.5.0" {
+		t.Fatalf("versions = (%q, %q), expected (1.5.0, 1.5.0)", absolute, compatible)
+	}
+}
+
 func TestParsePubspecYaml(t *testing.T) {
-	// Create a temporary pubspec.yaml file
+
 	tempDir := t.TempDir()
 	pubspecPath := filepath.Join(tempDir, "pubspec.yaml")
 
@@ -77,8 +114,6 @@ dev_dependencies:
 		t.Fatalf("Failed to parse pubspec.yaml: %v", err)
 	}
 
-	// Should exclude flutter SDK dependency and 'any' versions
-	// Should include: http, path, pubdev_hosted, private_package, test = 5 dependencies
 	if len(dependencies) != 5 {
 		t.Errorf("Expected 5 dependencies, got %d", len(dependencies))
 		for _, dependency := range dependencies {
@@ -86,7 +121,6 @@ dev_dependencies:
 		}
 	}
 
-	// Check specific dependencies
 	cleanVersionMap := make(map[string]string)
 	originalVersionMap := make(map[string]string)
 	hostedURLMap := make(map[string]string)
@@ -96,7 +130,6 @@ dev_dependencies:
 		hostedURLMap[dependency.Name] = dependency.HostedURL
 	}
 
-	// Check clean versions (without prefixes)
 	if cleanVersionMap["http"] != "0.13.5" {
 		t.Errorf("Expected http clean version '0.13.5', got '%s'", cleanVersionMap["http"])
 	}
@@ -105,7 +138,6 @@ dev_dependencies:
 		t.Errorf("Expected path clean version '1.8.0', got '%s'", cleanVersionMap["path"])
 	}
 
-	// Check original versions (with prefixes)
 	if originalVersionMap["http"] != "^0.13.5" {
 		t.Errorf("Expected http original version '^0.13.5', got '%s'", originalVersionMap["http"])
 	}
@@ -118,17 +150,14 @@ dev_dependencies:
 		t.Errorf("Expected test original version '>=1.21.0 <2.0.0', got '%s'", originalVersionMap["test"])
 	}
 
-	// Check that pub.dev hosted packages are included
 	if originalVersionMap["pubdev_hosted"] != "^1.0.0" {
 		t.Errorf("Expected pubdev_hosted original version '^1.0.0', got '%s'", originalVersionMap["pubdev_hosted"])
 	}
 
-	// Check that 'any' versions are excluded
 	if _, exists := originalVersionMap["intl"]; exists {
 		t.Errorf("Expected intl ('any' version) to be excluded, but it was found with version '%s'", originalVersionMap["intl"])
 	}
 
-	// Check that private hosted packages are included with correct hosted URL
 	if originalVersionMap["private_package"] != "^0.0.1" {
 		t.Errorf("Expected private_package original version '^0.0.1', got '%s'", originalVersionMap["private_package"])
 	}
@@ -136,7 +165,6 @@ dev_dependencies:
 		t.Errorf("Expected private_package hosted URL 'https://private.registry.com/pub', got '%s'", hostedURLMap["private_package"])
 	}
 
-	// Check that pub.dev packages have empty hosted URL
 	if hostedURLMap["http"] != "" {
 		t.Errorf("Expected http to have empty hosted URL, got '%s'", hostedURLMap["http"])
 	}
@@ -257,7 +285,7 @@ func TestRegistryClientRejectsEmptyLatestVersion(t *testing.T) {
 }
 
 func TestUpdatePubspecYaml(t *testing.T) {
-	// Create a temporary pubspec.yaml file
+
 	tempDir := t.TempDir()
 	pubspecPath := filepath.Join(tempDir, "pubspec.yaml")
 
@@ -278,7 +306,6 @@ dev_dependencies:
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
-	// Mock outdated dependencies
 	outdated := []shared.OutdatedDependency{
 		{
 			BaseDependency: shared.BaseDependency{
@@ -310,7 +337,6 @@ dev_dependencies:
 		t.Fatalf("Failed to update pubspec.yaml: %v", err)
 	}
 
-	// Read and verify the updated file
 	updatedContent, err := os.ReadFile(pubspecPath)
 	if err != nil {
 		t.Fatalf("Failed to read updated file: %v", err)
@@ -318,7 +344,6 @@ dev_dependencies:
 
 	updatedStr := string(updatedContent)
 
-	// Check that versions were updated correctly with prefixes preserved
 	if !strings.Contains(updatedStr, "http: ^0.13.6") {
 		t.Errorf("http version not updated correctly, content: %s", updatedStr)
 	}
@@ -327,31 +352,13 @@ dev_dependencies:
 		t.Errorf("path version not updated correctly, content: %s", updatedStr)
 	}
 
-	// test should remain unchanged
 	if !strings.Contains(updatedStr, `test: '>=1.21.0 <2.0.0'`) && !strings.Contains(updatedStr, `test: ">=1.21.0 <2.0.0"`) {
 		t.Errorf("test version should not have changed, content: %s", updatedStr)
 	}
 }
 
-func TestGetFileType(t *testing.T) {
-	parser := NewParser()
-	if parser.GetRegistryType() != shared.Pub {
-		t.Errorf("Expected registry type Pub, got '%s'", parser.GetRegistryType().String())
-	}
-
-	updater := NewUpdater()
-	if updater.GetRegistryType() != shared.Pub {
-		t.Errorf("Expected registry type Pub, got '%s'", updater.GetRegistryType().String())
-	}
-
-	registry := NewRegistryClient()
-	if registry.GetRegistryType() != shared.Pub {
-		t.Errorf("Expected registry type Pub, got '%s'", registry.GetRegistryType().String())
-	}
-}
-
 func TestParsePubspecYamlEdgeCases(t *testing.T) {
-	// Test various edge cases for pubspec parsing
+
 	tempDir := t.TempDir()
 	pubspecPath := filepath.Join(tempDir, "pubspec.yaml")
 
@@ -399,7 +406,6 @@ dependencies:
 		t.Fatalf("Failed to parse pubspec.yaml: %v", err)
 	}
 
-	// Should include: http, pubdev_hosted, private_pkg = 3 dependencies ('any' versions are filtered out)
 	expectedDeps := []string{"http", "pubdev_hosted", "private_pkg"}
 	if len(dependencies) != len(expectedDeps) {
 		t.Errorf("Expected %d dependencies, got %d", len(expectedDeps), len(dependencies))
@@ -408,20 +414,17 @@ dependencies:
 		}
 	}
 
-	// Create map for easier testing
 	dependencyMap := make(map[string]shared.Dependency)
 	for _, dependency := range dependencies {
 		dependencyMap[dependency.Name] = dependency
 	}
 
-	// Verify each expected dependency
 	for _, expectedName := range expectedDeps {
 		if _, exists := dependencyMap[expectedName]; !exists {
 			t.Errorf("Expected dependency '%s' not found", expectedName)
 		}
 	}
 
-	// Check specific version handling for pubdev_hosted
 	if dependency, exists := dependencyMap["pubdev_hosted"]; exists {
 		if dependency.OriginalVersion != "^1.0.0" {
 			t.Errorf("Expected pubdev_hosted original version '^1.0.0', got '%s'", dependency.OriginalVersion)
@@ -434,7 +437,6 @@ dependencies:
 		}
 	}
 
-	// Check private hosted package
 	if dependency, exists := dependencyMap["private_pkg"]; exists {
 		if dependency.OriginalVersion != "1.0.0" {
 			t.Errorf("Expected private_pkg original version '1.0.0', got '%s'", dependency.OriginalVersion)
@@ -444,7 +446,6 @@ dependencies:
 		}
 	}
 
-	// Verify excluded dependencies (including 'any' versions)
 	excludedDeps := []string{"flutter", "flutter_localizations", "git_pkg", "local_pkg", "intl"}
 	for _, excludedName := range excludedDeps {
 		if _, exists := dependencyMap[excludedName]; exists {
@@ -454,7 +455,7 @@ dependencies:
 }
 
 func TestUpdatePreservesAllContent(t *testing.T) {
-	// Realistic pubspec.yaml content with comments, metadata, assets, and dependencies
+
 	originalContent := `name: my_flutter_app
 description: A new Flutter application.
 version: 1.0.0+1
@@ -508,17 +509,14 @@ custom_config:
     new_ui: true
     analytics: false`
 
-	// Create a temporary test file
 	tmpDir := t.TempDir()
 	testFile := filepath.Join(tmpDir, "pubspec.yaml")
 
-	// Write the original content
 	err := os.WriteFile(testFile, []byte(originalContent), 0644)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Mock dependencies for update
 	outdatedDependencies := []shared.OutdatedDependency{
 		{
 			BaseDependency: shared.BaseDependency{
@@ -555,14 +553,12 @@ custom_config:
 		},
 	}
 
-	// Update the dependencies
 	updater := NewUpdater()
 	err = applyTestUpdate(testFile, outdatedDependencies, updater, shared.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Read the updated content
 	updatedContent, err := os.ReadFile(testFile)
 	if err != nil {
 		t.Fatal(err)
@@ -570,7 +566,6 @@ custom_config:
 
 	updatedStr := string(updatedContent)
 
-	// Verify that critical non-dependency content is preserved
 	criticalContent := []string{
 		"name: my_flutter_app",
 		"description: A new Flutter application.",
@@ -609,7 +604,6 @@ custom_config:
 		}
 	}
 
-	// Verify that dependencies were actually updated
 	expectedUpdates := map[string]string{
 		"http: ^0.13.5":        "http version should be updated to 0.13.5",
 		"provider: ^6.1.2":     "provider version should be updated to 6.1.2",
@@ -622,7 +616,6 @@ custom_config:
 		}
 	}
 
-	// Verify that unchanged dependencies remain unchanged
 	unchangedDeps := []string{
 		"collection: ^1.17.0",
 		"flutter_lints: ^2.0.0",
@@ -636,7 +629,7 @@ custom_config:
 }
 
 func TestUpdateHostedPackages(t *testing.T) {
-	// Create a pubspec.yaml with hosted packages
+
 	tempDir := t.TempDir()
 	pubspecPath := filepath.Join(tempDir, "pubspec.yaml")
 
@@ -672,7 +665,6 @@ dev_dependencies:
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
-	// Mock outdated hosted dependencies
 	outdated := []shared.OutdatedDependency{
 		{
 			BaseDependency: shared.BaseDependency{
@@ -717,7 +709,6 @@ dev_dependencies:
 		t.Fatalf("Failed to update pubspec.yaml: %v", err)
 	}
 
-	// Read and verify the updated file
 	updatedContent, err := os.ReadFile(pubspecPath)
 	if err != nil {
 		t.Fatalf("Failed to read updated file: %v", err)
@@ -725,12 +716,10 @@ dev_dependencies:
 
 	updatedStr := string(updatedContent)
 
-	// Verify that versions were updated correctly
 	if !strings.Contains(updatedStr, "http: ^0.13.5") {
 		t.Errorf("http version not updated correctly")
 	}
 
-	// Check hosted package updates - these should update the version field, not the hosted field
 	if !strings.Contains(updatedStr, "version: ^1.2.0") {
 		t.Errorf("company_core version not updated correctly")
 	}
@@ -738,7 +727,6 @@ dev_dependencies:
 		t.Errorf("internal_tools version not updated correctly")
 	}
 
-	// Verify hosted URLs are preserved
 	if !strings.Contains(updatedStr, "hosted: https://packages.company.com/pub") {
 		t.Errorf("company_core hosted URL not preserved")
 	}
@@ -746,14 +734,13 @@ dev_dependencies:
 		t.Errorf("internal_tools hosted URL not preserved")
 	}
 
-	// Verify unchanged dependency
 	if !strings.Contains(updatedStr, "company_test_utils:") {
 		t.Errorf("company_test_utils should remain unchanged")
 	}
 }
 
 func TestParsePubTokensFile(t *testing.T) {
-	// Create a temporary pub-tokens.json file
+
 	tempDir := t.TempDir()
 	pubTokensPath := filepath.Join(tempDir, "pub-tokens.json")
 
@@ -776,13 +763,11 @@ func TestParsePubTokensFile(t *testing.T) {
 		t.Fatalf("Failed to create test pub-tokens.json file: %v", err)
 	}
 
-	// Create config to parse into
-	config := &PubConfig{
-		Registries: make(map[string]RegistryConfig),
+	config := &pubConfig{
+		Registries: make(map[string]registryConfig),
 	}
 
-	// Add default pub.dev registry
-	config.Registries["pub.dev"] = RegistryConfig{
+	config.Registries["pub.dev"] = registryConfig{
 		URL: "https://pub.dev",
 	}
 
@@ -791,7 +776,6 @@ func TestParsePubTokensFile(t *testing.T) {
 		t.Fatalf("Failed to parse pub-tokens.json file: %v", err)
 	}
 
-	// Test that registries were added correctly
 	expectedRegistries := map[string]struct {
 		url   string
 		token string
@@ -829,11 +813,9 @@ func TestParsePubTokensFile(t *testing.T) {
 }
 
 func TestPubConfigIntegration(t *testing.T) {
-	// This test verifies the full integration of parsing pub configuration
-	// Create temporary directories to simulate the real environment
+
 	tempDir := t.TempDir()
 
-	// Create a fake platform-specific user configuration directory.
 	homeDir := filepath.Join(tempDir, "home")
 	t.Setenv("HOME", homeDir)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(homeDir, ".config"))
@@ -847,7 +829,6 @@ func TestPubConfigIntegration(t *testing.T) {
 		t.Fatalf("Failed to create dart directory: %v", err)
 	}
 
-	// Create pub-tokens.json
 	pubTokensPath := filepath.Join(dartDir, "pub-tokens.json")
 	pubTokensContent := `{
   "version": 1,
@@ -864,20 +845,17 @@ func TestPubConfigIntegration(t *testing.T) {
 		t.Fatalf("Failed to create pub-tokens.json: %v", err)
 	}
 
-	// Test the full configuration parsing
 	config, err := parsePubConfig(nil)
 	if err != nil {
 		t.Fatalf("Failed to parse pub config: %v", err)
 	}
 
-	// Verify default pub.dev registry is present
 	if registry, exists := config.Registries["pub.dev"]; !exists {
 		t.Errorf("Default pub.dev registry not found")
 	} else if registry.URL != "https://pub.dev" {
 		t.Errorf("Expected pub.dev URL to be 'https://pub.dev', got '%s'", registry.URL)
 	}
 
-	// Verify pub-tokens.json registries
 	expectedRegistries := map[string]struct {
 		url   string
 		token string
@@ -968,7 +946,7 @@ func TestRegistryClientCachesPubConfiguration(t *testing.T) {
 }
 
 func TestUpdaterWithInvertedSectionOrder(t *testing.T) {
-	// Test pubspec.yaml with dev_dependencies before dependencies
+
 	pubspecContent := `name: test_package
 version: 1.0.0
 
@@ -983,24 +961,21 @@ dependencies:
 flutter:
   uses-material-design: true`
 
-	// Create temporary files for testing
 	tempDir := t.TempDir()
-	pubspecPath1 := filepath.Join(tempDir, "pubspec1.yaml")
-	pubspecPath2 := filepath.Join(tempDir, "pubspec2.yaml")
+	dependencyPubspecPath := filepath.Join(tempDir, "dependencies.yaml")
+	devDependencyPubspecPath := filepath.Join(tempDir, "dev-dependencies.yaml")
 
-	// Write content to both files
-	err := os.WriteFile(pubspecPath1, []byte(pubspecContent), 0644)
+	err := os.WriteFile(dependencyPubspecPath, []byte(pubspecContent), 0644)
 	if err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
-	err = os.WriteFile(pubspecPath2, []byte(pubspecContent), 0644)
+	err = os.WriteFile(devDependencyPubspecPath, []byte(pubspecContent), 0644)
 	if err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
 	updater := &Updater{}
 
-	// Test updating a dependency in the dependencies section
 	outdatedDependencies := []shared.OutdatedDependency{
 		{
 			BaseDependency: shared.BaseDependency{
@@ -1015,28 +990,25 @@ flutter:
 		},
 	}
 
-	err = applyTestUpdate(pubspecPath1, outdatedDependencies, updater, shared.Options{})
+	err = applyTestUpdate(dependencyPubspecPath, outdatedDependencies, updater, shared.Options{})
 	if err != nil {
 		t.Fatalf("Failed to update dependencies: %v", err)
 	}
 
-	// Read and verify the updated file
-	updated, err := os.ReadFile(pubspecPath1)
+	updatedDependencies, err := os.ReadFile(dependencyPubspecPath)
 	if err != nil {
 		t.Fatalf("Failed to read updated file: %v", err)
 	}
-	updatedStr := string(updated)
+	dependenciesText := string(updatedDependencies)
 
-	if !strings.Contains(updatedStr, "http: ^0.13.6") {
+	if !strings.Contains(dependenciesText, "http: ^0.13.6") {
 		t.Errorf("Expected http dependency to be updated to ^0.13.6")
 	}
 
-	// Verify the old version is not present
-	if strings.Contains(updatedStr, "http: ^0.13.5") {
+	if strings.Contains(dependenciesText, "http: ^0.13.5") {
 		t.Errorf("Old http version ^0.13.5 should not be present")
 	}
 
-	// Test updating a dev dependency
 	devDependencies := []shared.OutdatedDependency{
 		{
 			BaseDependency: shared.BaseDependency{
@@ -1051,35 +1023,30 @@ flutter:
 		},
 	}
 
-	updaterInstance := NewUpdater()
-	err = applyTestUpdate(pubspecPath2, devDependencies, updaterInstance, shared.Options{})
+	err = applyTestUpdate(devDependencyPubspecPath, devDependencies, updater, shared.Options{})
 	if err != nil {
 		t.Fatalf("Failed to update dev dependencies: %v", err)
 	}
 
-	// Read and verify the updated file
-	updated2, err := os.ReadFile(pubspecPath2)
+	updatedDevDependencies, err := os.ReadFile(devDependencyPubspecPath)
 	if err != nil {
 		t.Fatalf("Failed to read updated file: %v", err)
 	}
-	updated2Str := string(updated2)
+	devDependenciesText := string(updatedDevDependencies)
 
-	if !strings.Contains(updated2Str, "test: ^1.22.0") {
+	if !strings.Contains(devDependenciesText, "test: ^1.22.0") {
 		t.Errorf("Expected test dev dependency to be updated to ^1.22.0")
 	}
 
-	// Verify the old version is not present
-	if strings.Contains(updated2Str, "test: ^1.21.0") {
+	if strings.Contains(devDependenciesText, "test: ^1.21.0") {
 		t.Errorf("Old test version ^1.21.0 should not be present")
 	}
 
-	// Verify that updating dependencies section doesn't affect dev_dependencies section
-	if !strings.Contains(updatedStr, "test: ^1.21.0") {
+	if !strings.Contains(dependenciesText, "test: ^1.21.0") {
 		t.Errorf("test dev dependency should remain unchanged when updating dependencies")
 	}
 
-	// Verify that updating dev_dependencies section doesn't affect dependencies section
-	if !strings.Contains(updated2Str, "http: ^0.13.5") {
+	if !strings.Contains(devDependenciesText, "http: ^0.13.5") {
 		t.Errorf("http dependency should remain unchanged when updating dev dependencies")
 	}
 }
@@ -1115,7 +1082,7 @@ dependencies:
 
 	for _, dependency := range dependencies {
 		registryURL := dependency.HostedURL
-		// Simulate the same URL construction used in registry.go
+
 		url := fmt.Sprintf("%s/api/packages/%s", strings.TrimRight(registryURL, "/"), dependency.Name)
 		if strings.Contains(url, "//api") {
 			t.Errorf("URL for %s contains double slash: %s", dependency.Name, url)

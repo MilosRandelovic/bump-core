@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,12 +9,19 @@ import (
 	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
 
-func TestParsePackageJson(t *testing.T) {
-	// Create a temporary package.json file
-	tempDir := t.TempDir()
-	packageJsonPath := filepath.Join(tempDir, "package.json")
+func TestParseDependenciesRejectsUnsupportedRegistry(t *testing.T) {
+	_, err := ParseDependencies("package.json", shared.RegistryType(99), shared.Options{})
+	if !errors.Is(err, shared.ErrUnsupportedRegistryType) {
+		t.Fatalf("expected unsupported-registry error, got %v", err)
+	}
+}
 
-	packageJsonContent := `{
+func TestParsePackageJson(t *testing.T) {
+
+	tempDir := t.TempDir()
+	packageJSONPath := filepath.Join(tempDir, "package.json")
+
+	packageJSONContent := `{
 		"dependencies": {
 			"react": "^18.0.0",
 			"lodash": "~4.17.20"
@@ -23,12 +31,12 @@ func TestParsePackageJson(t *testing.T) {
 		}
 	}`
 
-	err := os.WriteFile(packageJsonPath, []byte(packageJsonContent), 0644)
+	err := os.WriteFile(packageJSONPath, []byte(packageJSONContent), 0644)
 	if err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
-	dependencies, err := ParseDependencies(packageJsonPath, shared.Npm, shared.Options{})
+	dependencies, err := ParseDependencies(packageJSONPath, shared.NPM, shared.Options{})
 	if err != nil {
 		t.Fatalf("Failed to parse package.json: %v", err)
 	}
@@ -37,7 +45,6 @@ func TestParsePackageJson(t *testing.T) {
 		t.Errorf("Expected 3 dependencies, got %d", len(dependencies))
 	}
 
-	// Check specific dependencies - create maps for both clean and original versions
 	cleanVersionMap := make(map[string]string)
 	originalVersionMap := make(map[string]string)
 	for _, dependency := range dependencies {
@@ -45,7 +52,6 @@ func TestParsePackageJson(t *testing.T) {
 		originalVersionMap[dependency.Name] = dependency.OriginalVersion
 	}
 
-	// Check clean versions (without prefixes)
 	if cleanVersionMap["react"] != "18.0.0" {
 		t.Errorf("Expected react clean version '18.0.0', got '%s'", cleanVersionMap["react"])
 	}
@@ -58,7 +64,6 @@ func TestParsePackageJson(t *testing.T) {
 		t.Errorf("Expected typescript clean version '4.9.0', got '%s'", cleanVersionMap["typescript"])
 	}
 
-	// Check original versions (with prefixes)
 	if originalVersionMap["react"] != "^18.0.0" {
 		t.Errorf("Expected react original version '^18.0.0', got '%s'", originalVersionMap["react"])
 	}
@@ -73,7 +78,7 @@ func TestParsePackageJson(t *testing.T) {
 }
 
 func TestParsePubspecYaml(t *testing.T) {
-	// Create a temporary pubspec.yaml file
+
 	tempDir := t.TempDir()
 	pubspecPath := filepath.Join(tempDir, "pubspec.yaml")
 
@@ -102,8 +107,6 @@ dev_dependencies:
 		t.Fatalf("Failed to parse pubspec.yaml: %v", err)
 	}
 
-	// Should have 3 dependencies (http, shared_preferences, mockito)
-	// flutter and flutter_test SDK dependencies are skipped
 	if len(dependencies) != 3 {
 		t.Errorf("Expected 3 dependencies, got %d", len(dependencies))
 		for i, dependency := range dependencies {
@@ -111,7 +114,6 @@ dev_dependencies:
 		}
 	}
 
-	// Check specific dependencies - create maps for both clean and original versions
 	cleanVersionMap := make(map[string]string)
 	originalVersionMap := make(map[string]string)
 	for _, dependency := range dependencies {
@@ -119,7 +121,6 @@ dev_dependencies:
 		originalVersionMap[dependency.Name] = dependency.OriginalVersion
 	}
 
-	// Check clean versions (without prefixes)
 	if cleanVersionMap["http"] != "0.13.0" {
 		t.Errorf("Expected http clean version '0.13.0', got '%s'", cleanVersionMap["http"])
 	}
@@ -132,7 +133,6 @@ dev_dependencies:
 		t.Errorf("Expected mockito clean version '5.3.0', got '%s'", cleanVersionMap["mockito"])
 	}
 
-	// Check original versions (with prefixes)
 	if originalVersionMap["http"] != "^0.13.0" {
 		t.Errorf("Expected http original version '^0.13.0', got '%s'", originalVersionMap["http"])
 	}
@@ -145,7 +145,6 @@ dev_dependencies:
 		t.Errorf("Expected mockito original version '^5.3.0', got '%s'", originalVersionMap["mockito"])
 	}
 
-	// Test that CleanVersion function works
 	if shared.CleanVersion("^1.0.0") != "1.0.0" {
 		t.Errorf("shared.CleanVersion function not working correctly")
 	}
