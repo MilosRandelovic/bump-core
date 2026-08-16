@@ -8,12 +8,12 @@ import (
 	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
 
-// ParseDependencies parses dependencies from a file based on its type
+// ParseDependencies delegates filePath to the parser for registryType without emitting diagnostics.
 func ParseDependencies(filePath string, registryType shared.RegistryType, options shared.Options) ([]shared.Dependency, error) {
 	return ParseDependenciesWithLog(filePath, registryType, options, nil)
 }
 
-// ParseDependenciesWithLog parses dependencies and forwards ecosystem-specific diagnostics to log.
+// ParseDependenciesWithLog delegates filePath to the parser for registryType and forwards optional diagnostics to log.
 func ParseDependenciesWithLog(filePath string, registryType shared.RegistryType, options shared.Options, log shared.LogFunc) ([]shared.Dependency, error) {
 	parser, err := getParser(registryType, log)
 	if err != nil {
@@ -25,7 +25,7 @@ func ParseDependenciesWithLog(filePath string, registryType shared.RegistryType,
 // getParser returns the appropriate parser for the given file type
 func getParser(registryType shared.RegistryType, log shared.LogFunc) (shared.Parser, error) {
 	switch registryType {
-	case shared.Npm:
+	case shared.NPM:
 		parser := npm.NewParser()
 		parser.Log = log
 		return parser, nil
@@ -34,6 +34,6 @@ func getParser(registryType shared.RegistryType, log shared.LogFunc) (shared.Par
 		parser.Log = log
 		return parser, nil
 	default:
-		return nil, fmt.Errorf("unsupported registry type: %s", registryType)
+		return nil, fmt.Errorf("%w: %d", shared.ErrUnsupportedRegistryType, registryType)
 	}
 }

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
@@ -42,7 +43,44 @@ func TestRegistryClientPreservesAbsoluteLatestOnConstraintError(t *testing.T) {
 	}
 }
 
+func TestRegistryClientMinimumAgeSelectsNewestEligibleVersion(t *testing.T) {
+	now := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(response, `{
+			"latest":{"version":"2.0.0"},
+			"versions":[
+				{"version":"1.0.0","published":%q},
+				{"version":"1.5.0","published":%q},
+				{"version":"2.0.0","published":%q}
+			]
+		}`, now.Add(-72*time.Hour).Format(time.RFC3339), now.Add(-25*time.Hour).Format(time.RFC3339), now.Add(-time.Hour).Format(time.RFC3339))
+	}))
+	defer server.Close()
+
+	client := NewRegistryClient()
+	client.currentTime = func() time.Time { return now }
+	options := shared.Options{EnforceMinimumReleaseAge: true}
+
+	latest, err := client.GetLatestVersionFromRegistry(context.Background(), "example", server.URL, options, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest != "1.5.0" {
+		t.Fatalf("latest = %q, expected 1.5.0", latest)
+	}
+
+	absolute, compatible, err := client.GetBothLatestVersions(context.Background(), "example", "^1.0.0", server.URL, options, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if absolute != "1.5.0" || compatible != "1.5.0" {
+		t.Fatalf("versions = (%q, %q), expected (1.5.0, 1.5.0)", absolute, compatible)
+	}
+}
+
 func TestParsePubspecYaml(t *testing.T) {
+
 	// Create a temporary pubspec.yaml file
 	tempDir := t.TempDir()
 	pubspecPath := filepath.Join(tempDir, "pubspec.yaml")
@@ -257,6 +295,7 @@ func TestRegistryClientRejectsEmptyLatestVersion(t *testing.T) {
 }
 
 func TestUpdatePubspecYaml(t *testing.T) {
+
 	// Create a temporary pubspec.yaml file
 	tempDir := t.TempDir()
 	pubspecPath := filepath.Join(tempDir, "pubspec.yaml")
@@ -333,24 +372,8 @@ dev_dependencies:
 	}
 }
 
-func TestGetFileType(t *testing.T) {
-	parser := NewParser()
-	if parser.GetRegistryType() != shared.Pub {
-		t.Errorf("Expected registry type Pub, got '%s'", parser.GetRegistryType().String())
-	}
-
-	updater := NewUpdater()
-	if updater.GetRegistryType() != shared.Pub {
-		t.Errorf("Expected registry type Pub, got '%s'", updater.GetRegistryType().String())
-	}
-
-	registry := NewRegistryClient()
-	if registry.GetRegistryType() != shared.Pub {
-		t.Errorf("Expected registry type Pub, got '%s'", registry.GetRegistryType().String())
-	}
-}
-
 func TestParsePubspecYamlEdgeCases(t *testing.T) {
+
 	// Test various edge cases for pubspec parsing
 	tempDir := t.TempDir()
 	pubspecPath := filepath.Join(tempDir, "pubspec.yaml")
@@ -454,6 +477,7 @@ dependencies:
 }
 
 func TestUpdatePreservesAllContent(t *testing.T) {
+
 	// Realistic pubspec.yaml content with comments, metadata, assets, and dependencies
 	originalContent := `name: my_flutter_app
 description: A new Flutter application.
@@ -636,6 +660,7 @@ custom_config:
 }
 
 func TestUpdateHostedPackages(t *testing.T) {
+
 	// Create a pubspec.yaml with hosted packages
 	tempDir := t.TempDir()
 	pubspecPath := filepath.Join(tempDir, "pubspec.yaml")
@@ -753,6 +778,7 @@ dev_dependencies:
 }
 
 func TestParsePubTokensFile(t *testing.T) {
+
 	// Create a temporary pub-tokens.json file
 	tempDir := t.TempDir()
 	pubTokensPath := filepath.Join(tempDir, "pub-tokens.json")
@@ -777,12 +803,12 @@ func TestParsePubTokensFile(t *testing.T) {
 	}
 
 	// Create config to parse into
-	config := &PubConfig{
-		Registries: make(map[string]RegistryConfig),
+	config := &pubConfig{
+		Registries: make(map[string]registryConfig),
 	}
 
 	// Add default pub.dev registry
-	config.Registries["pub.dev"] = RegistryConfig{
+	config.Registries["pub.dev"] = registryConfig{
 		URL: "https://pub.dev",
 	}
 
@@ -829,6 +855,7 @@ func TestParsePubTokensFile(t *testing.T) {
 }
 
 func TestPubConfigIntegration(t *testing.T) {
+
 	// This test verifies the full integration of parsing pub configuration
 	// Create temporary directories to simulate the real environment
 	tempDir := t.TempDir()
@@ -968,6 +995,7 @@ func TestRegistryClientCachesPubConfiguration(t *testing.T) {
 }
 
 func TestUpdaterWithInvertedSectionOrder(t *testing.T) {
+
 	// Test pubspec.yaml with dev_dependencies before dependencies
 	pubspecContent := `name: test_package
 version: 1.0.0
@@ -985,15 +1013,15 @@ flutter:
 
 	// Create temporary files for testing
 	tempDir := t.TempDir()
-	pubspecPath1 := filepath.Join(tempDir, "pubspec1.yaml")
-	pubspecPath2 := filepath.Join(tempDir, "pubspec2.yaml")
+	dependencyPubspecPath := filepath.Join(tempDir, "dependencies.yaml")
+	devDependencyPubspecPath := filepath.Join(tempDir, "dev-dependencies.yaml")
 
 	// Write content to both files
-	err := os.WriteFile(pubspecPath1, []byte(pubspecContent), 0644)
+	err := os.WriteFile(dependencyPubspecPath, []byte(pubspecContent), 0644)
 	if err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
-	err = os.WriteFile(pubspecPath2, []byte(pubspecContent), 0644)
+	err = os.WriteFile(devDependencyPubspecPath, []byte(pubspecContent), 0644)
 	if err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
@@ -1015,24 +1043,24 @@ flutter:
 		},
 	}
 
-	err = applyTestUpdate(pubspecPath1, outdatedDependencies, updater, shared.Options{})
+	err = applyTestUpdate(dependencyPubspecPath, outdatedDependencies, updater, shared.Options{})
 	if err != nil {
 		t.Fatalf("Failed to update dependencies: %v", err)
 	}
 
 	// Read and verify the updated file
-	updated, err := os.ReadFile(pubspecPath1)
+	updatedDependencies, err := os.ReadFile(dependencyPubspecPath)
 	if err != nil {
 		t.Fatalf("Failed to read updated file: %v", err)
 	}
-	updatedStr := string(updated)
+	dependenciesText := string(updatedDependencies)
 
-	if !strings.Contains(updatedStr, "http: ^0.13.6") {
+	if !strings.Contains(dependenciesText, "http: ^0.13.6") {
 		t.Errorf("Expected http dependency to be updated to ^0.13.6")
 	}
 
 	// Verify the old version is not present
-	if strings.Contains(updatedStr, "http: ^0.13.5") {
+	if strings.Contains(dependenciesText, "http: ^0.13.5") {
 		t.Errorf("Old http version ^0.13.5 should not be present")
 	}
 
@@ -1051,35 +1079,34 @@ flutter:
 		},
 	}
 
-	updaterInstance := NewUpdater()
-	err = applyTestUpdate(pubspecPath2, devDependencies, updaterInstance, shared.Options{})
+	err = applyTestUpdate(devDependencyPubspecPath, devDependencies, updater, shared.Options{})
 	if err != nil {
 		t.Fatalf("Failed to update dev dependencies: %v", err)
 	}
 
 	// Read and verify the updated file
-	updated2, err := os.ReadFile(pubspecPath2)
+	updatedDevDependencies, err := os.ReadFile(devDependencyPubspecPath)
 	if err != nil {
 		t.Fatalf("Failed to read updated file: %v", err)
 	}
-	updated2Str := string(updated2)
+	devDependenciesText := string(updatedDevDependencies)
 
-	if !strings.Contains(updated2Str, "test: ^1.22.0") {
+	if !strings.Contains(devDependenciesText, "test: ^1.22.0") {
 		t.Errorf("Expected test dev dependency to be updated to ^1.22.0")
 	}
 
 	// Verify the old version is not present
-	if strings.Contains(updated2Str, "test: ^1.21.0") {
+	if strings.Contains(devDependenciesText, "test: ^1.21.0") {
 		t.Errorf("Old test version ^1.21.0 should not be present")
 	}
 
 	// Verify that updating dependencies section doesn't affect dev_dependencies section
-	if !strings.Contains(updatedStr, "test: ^1.21.0") {
+	if !strings.Contains(dependenciesText, "test: ^1.21.0") {
 		t.Errorf("test dev dependency should remain unchanged when updating dependencies")
 	}
 
 	// Verify that updating dev_dependencies section doesn't affect dependencies section
-	if !strings.Contains(updated2Str, "http: ^0.13.5") {
+	if !strings.Contains(devDependenciesText, "http: ^0.13.5") {
 		t.Errorf("http dependency should remain unchanged when updating dev dependencies")
 	}
 }
@@ -1115,6 +1142,7 @@ dependencies:
 
 	for _, dependency := range dependencies {
 		registryURL := dependency.HostedURL
+
 		// Simulate the same URL construction used in registry.go
 		url := fmt.Sprintf("%s/api/packages/%s", strings.TrimRight(registryURL, "/"), dependency.Name)
 		if strings.Contains(url, "//api") {

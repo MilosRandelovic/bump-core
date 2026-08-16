@@ -1,6 +1,7 @@
 package updater
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -19,17 +20,41 @@ import (
 )
 
 type concurrentLogRegistry struct {
-	active  atomic.Int32
-	maximum atomic.Int32
-	delays  map[string]time.Duration
+	active    atomic.Int32
+	maxActive atomic.Int32
+	delays    map[string]time.Duration
 }
 
-func (registry *concurrentLogRegistry) GetLatestVersionFromRegistry(ctx context.Context, packageName, _ string, _ shared.Options, _ *shared.Cache) (string, error) {
+func TestValidateOptionsRejectsUnsupportedRegistry(t *testing.T) {
+	err := ValidateOptions(shared.RegistryType(99), shared.Options{})
+	if !errors.Is(err, shared.ErrUnsupportedRegistryType) {
+		t.Fatalf("expected unsupported-registry error, got %v", err)
+	}
+}
+
+type cancellationRegistry struct {
+	started chan struct{}
+	count   atomic.Int32
+}
+
+func (registry *cancellationRegistry) GetLatestVersionFromRegistry(ctx context.Context, packageName string, registryURL string, options shared.Options, cache *shared.Cache) (string, error) {
+	registry.count.Add(1)
+	registry.started <- struct{}{}
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+func (registry *cancellationRegistry) GetBothLatestVersions(ctx context.Context, packageName string, constraint string, registryURL string, options shared.Options, cache *shared.Cache) (absoluteLatest string, constraintLatest string, err error) {
+	latest, err := registry.GetLatestVersionFromRegistry(ctx, packageName, registryURL, options, cache)
+	return latest, latest, err
+}
+
+func (registry *concurrentLogRegistry) GetLatestVersionFromRegistry(ctx context.Context, packageName string, registryURL string, options shared.Options, cache *shared.Cache) (string, error) {
 	active := registry.active.Add(1)
 	defer registry.active.Add(-1)
 	for {
-		maximum := registry.maximum.Load()
-		if active <= maximum || registry.maximum.CompareAndSwap(maximum, active) {
+		maxActive := registry.maxActive.Load()
+		if active <= maxActive || registry.maxActive.CompareAndSwap(maxActive, active) {
 			break
 		}
 	}
@@ -44,12 +69,10 @@ func (registry *concurrentLogRegistry) GetLatestVersionFromRegistry(ctx context.
 	return "2.0.0", nil
 }
 
-func (registry *concurrentLogRegistry) GetBothLatestVersions(ctx context.Context, packageName, _ string, registryURL string, options shared.Options, cache *shared.Cache) (string, string, error) {
+func (registry *concurrentLogRegistry) GetBothLatestVersions(ctx context.Context, packageName string, constraint string, registryURL string, options shared.Options, cache *shared.Cache) (absoluteLatest string, constraintLatest string, err error) {
 	latest, err := registry.GetLatestVersionFromRegistry(ctx, packageName, registryURL, options, cache)
 	return latest, latest, err
 }
-
-func (*concurrentLogRegistry) GetRegistryType() shared.RegistryType { return shared.Npm }
 
 func TestFindBothLatestVersions(t *testing.T) {
 	tests := []struct {
@@ -193,12 +216,52 @@ func TestHasSemanticPrefix(t *testing.T) {
 	}
 }
 
-// MockRegistryClient for testing
-type MockRegistryClient struct {
+// mockRegistryClient provides fixed package versions for tests.
+type mockRegistryClient struct {
 	packageVersions map[string][]string
 }
 
-func (mockClient *MockRegistryClient) GetLatestVersionFromRegistry(_ context.Context, packageName, registryURL string, options shared.Options, cache *shared.Cache) (string, error) {
+type fixedRegistryClient struct {
+	absoluteLatest   string
+	constraintLatest string
+	err              error
+}
+
+func (client *fixedRegistryClient) GetLatestVersionFromRegistry(ctx context.Context, packageName string, registryURL string, options shared.Options, cache *shared.Cache) (string, error) {
+	return client.absoluteLatest, client.err
+}
+
+func (client *fixedRegistryClient) GetBothLatestVersions(ctx context.Context, packageName string, constraint string, registryURL string, options shared.Options, cache *shared.Cache) (absoluteLatest string, constraintLatest string, err error) {
+	return client.absoluteLatest, client.constraintLatest, client.err
+}
+
+func TestMinimumAgeNeverSuggestsDowngrade(t *testing.T) {
+	dependency := shared.Dependency{
+		BaseDependency: shared.BaseDependency{Name: "example", OriginalVersion: "^2.0.0", Type: shared.Dependencies},
+		Version:        "2.0.0",
+	}
+	registry := &fixedRegistryClient{absoluteLatest: "1.5.0", constraintLatest: "1.5.0"}
+	var result checkResult
+	checkSingleDependency(context.Background(), dependency, registry, shared.Options{EnforceMinimumReleaseAge: true}, nil, &result, nil)
+	if len(result.outdated) != 0 || len(result.semverSkipped) != 0 || len(result.errors) != 0 {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
+func TestMinimumAgeWithNoEligibleVersionsIsNotAnError(t *testing.T) {
+	dependency := shared.Dependency{
+		BaseDependency: shared.BaseDependency{Name: "example", OriginalVersion: "1.0.0", Type: shared.Dependencies},
+		Version:        "1.0.0",
+	}
+	registry := &fixedRegistryClient{err: shared.ErrNoVersionsMeetMinimumReleaseAge}
+	var result checkResult
+	checkSingleDependency(context.Background(), dependency, registry, shared.Options{EnforceMinimumReleaseAge: true}, nil, &result, nil)
+	if len(result.outdated) != 0 || len(result.semverSkipped) != 0 || len(result.errors) != 0 {
+		t.Fatalf("unexpected result: %#v", result)
+	}
+}
+
+func (mockClient *mockRegistryClient) GetLatestVersionFromRegistry(ctx context.Context, packageName string, registryURL string, options shared.Options, cache *shared.Cache) (string, error) {
 	versions := mockClient.packageVersions[packageName]
 	if len(versions) == 0 {
 		return "", fmt.Errorf("package not found")
@@ -206,7 +269,7 @@ func (mockClient *MockRegistryClient) GetLatestVersionFromRegistry(_ context.Con
 	return versions[len(versions)-1], nil
 }
 
-func (mockClient *MockRegistryClient) GetBothLatestVersions(_ context.Context, packageName, constraint, registryURL string, options shared.Options, cache *shared.Cache) (string, string, error) {
+func (mockClient *mockRegistryClient) GetBothLatestVersions(ctx context.Context, packageName string, constraint string, registryURL string, options shared.Options, cache *shared.Cache) (absoluteLatest string, constraintLatest string, err error) {
 	versions := mockClient.packageVersions[packageName]
 	if len(versions) == 0 {
 		return "", "", fmt.Errorf("package not found")
@@ -214,13 +277,10 @@ func (mockClient *MockRegistryClient) GetBothLatestVersions(_ context.Context, p
 	return shared.FindBothLatestVersions(versions, constraint)
 }
 
-func (mockClient *MockRegistryClient) GetRegistryType() shared.RegistryType {
-	return shared.Npm // Mock defaults to Npm type
-}
-
 func TestCheckForUpdatesIntegration(t *testing.T) {
+
 	// Mock registry client with pre-release versions
-	mockRegistry := &MockRegistryClient{
+	mockRegistry := &mockRegistryClient{
 		packageVersions: map[string][]string{
 			"@types/node": {"22.15.0", "22.16.0", "22.17.0", "24.0.0-alpha", "24.0.0-beta", "24.1.0"},
 			"typescript":  {"5.8.0", "5.8.3", "5.9.0", "5.9.2"},
@@ -253,9 +313,10 @@ func TestCheckForUpdatesIntegration(t *testing.T) {
 }
 
 func TestConstraintMatchesNoVersions(t *testing.T) {
+
 	// Test that when constraint matches no available versions,
 	// it goes to semverSkipped instead of errors
-	mockRegistry := &MockRegistryClient{
+	mockRegistry := &mockRegistryClient{
 		packageVersions: map[string][]string{
 			"core": {"1.0.0", "1.1.0", "1.7.0"}, // Available versions: all 1.x
 		},
@@ -283,6 +344,7 @@ func TestConstraintMatchesNoVersions(t *testing.T) {
 }
 
 func TestWorkspaceDependenciesSkipped(t *testing.T) {
+
 	// Test that workspace dependencies with * version are skipped
 	dependencies := []shared.Dependency{
 		{
@@ -327,7 +389,7 @@ func TestWorkspaceDependenciesSkipped(t *testing.T) {
 		},
 	}
 
-	mockRegistry := &MockRegistryClient{
+	mockRegistry := &mockRegistryClient{
 		packageVersions: map[string][]string{
 			"lodash": {"4.17.21", "4.18.0"},
 			"axios":  {"1.6.0", "1.7.0"},
@@ -341,7 +403,7 @@ func TestWorkspaceDependenciesSkipped(t *testing.T) {
 		mockRegistry,
 		shared.Options{},
 		"/test",
-		func(current, total int) { progress = append(progress, [2]int{current, total}) },
+		func(update shared.Progress) { progress = append(progress, [2]int{update.Current, update.Total}) },
 		nil,
 		nil,
 	)
@@ -356,8 +418,8 @@ func TestWorkspaceDependenciesSkipped(t *testing.T) {
 		}
 	}
 
-	for _, errDep := range result.Errors {
-		if errDep.Name == "@monorepo/package-a" {
+	for _, dependencyError := range result.Errors {
+		if dependencyError.Name == "@monorepo/package-a" {
 			t.Error("Workspace dependency @monorepo/package-a should be skipped, but found in errors list")
 		}
 	}
@@ -398,7 +460,7 @@ func TestProductionCheckClassifiesConstraintMismatch(t *testing.T) {
 		},
 		Version: "0.0.1",
 	}
-	registry := &MockRegistryClient{packageVersions: map[string][]string{
+	registry := &mockRegistryClient{packageVersions: map[string][]string{
 		"core": {"1.0.0", "1.7.0"},
 	}}
 
@@ -423,7 +485,7 @@ func TestProductionCheckClassifiesConstraintMismatch(t *testing.T) {
 	}
 }
 
-func TestCheckOutdatedEndToEndWithNpmRegistry(t *testing.T) {
+func TestCheckOutdatedEndToEndWithNPMRegistry(t *testing.T) {
 	registry := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Content-Type", "application/json")
 		fmt.Fprint(response, `{"dist-tags":{"latest":"1.2.0"},"versions":{"1.0.0":{"version":"1.0.0"},"1.2.0":{"version":"1.2.0"}}}`)
@@ -447,10 +509,10 @@ func TestCheckOutdatedEndToEndWithNpmRegistry(t *testing.T) {
 	result, err := CheckOutdated(
 		context.Background(),
 		[]shared.Dependency{dependency},
-		shared.Npm,
+		shared.NPM,
 		shared.Options{NoCache: true},
 		"",
-		func(current, total int) { progress = append(progress, [2]int{current, total}) },
+		func(update shared.Progress) { progress = append(progress, [2]int{update.Current, update.Total}) },
 		func(format string, args ...any) { fmt.Fprintf(&logs, format, args...) },
 	)
 	if err != nil {
@@ -498,7 +560,7 @@ func TestUpdateDependenciesValidatesEveryFileBeforeWriting(t *testing.T) {
 		},
 	}
 
-	err := UpdateDependencies(rootPath, outdated, shared.Npm, shared.Options{}, directory, nil)
+	err := UpdateDependencies(context.Background(), rootPath, outdated, shared.NPM, shared.Options{}, directory, nil)
 	if err == nil || !strings.Contains(err.Error(), "changed on line") {
 		t.Fatalf("expected stale workspace error, got %v", err)
 	}
@@ -508,6 +570,62 @@ func TestUpdateDependenciesValidatesEveryFileBeforeWriting(t *testing.T) {
 	}
 	if string(rootAfter) != rootContent {
 		t.Fatal("root file was modified before every target passed validation")
+	}
+}
+
+func TestUpdateDependenciesRejectsUnknownDependencyTypeBeforeWriting(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "package.json")
+	original := []byte("{\n  \"dependencies\": {\n    \"example\": \"1.0.0\"\n  }\n}\n")
+	if err := os.WriteFile(filePath, original, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := UpdateDependencies(context.Background(), filePath, []shared.OutdatedDependency{{
+		BaseDependency: shared.BaseDependency{
+			Name:            "example",
+			OriginalVersion: "1.0.0",
+			Type:            shared.DependencyType(99),
+			FilePath:        filePath,
+			LineNumber:      3,
+		},
+		CurrentVersion: "1.0.0",
+		LatestVersion:  "1.1.0",
+	}}, shared.NPM, shared.Options{}, filepath.Dir(filePath), func(format string, args ...any) {})
+	if err == nil || !strings.Contains(err.Error(), "unsupported dependency type") {
+		t.Fatalf("expected dependency-type error, got %v", err)
+	}
+
+	actual, readErr := os.ReadFile(filePath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(actual, original) {
+		t.Fatalf("file changed despite validation failure: %s", actual)
+	}
+}
+
+func TestUpdateDependenciesHonoursCancellationBeforeWriting(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "package.json")
+	content := "{\n  \"dependencies\": {\n    \"example\": \"^1.0.0\"\n  }\n}\n"
+	if err := os.WriteFile(filePath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := UpdateDependencies(ctx, filePath, []shared.OutdatedDependency{{
+		BaseDependency: shared.BaseDependency{Name: "example", OriginalVersion: "^1.0.0", Type: shared.Dependencies, FilePath: filePath, LineNumber: 3},
+		CurrentVersion: "1.0.0",
+		LatestVersion:  "1.1.0",
+	}}, shared.NPM, shared.Options{}, filepath.Dir(filePath), nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, expected cancellation", err)
+	}
+	updated, readErr := os.ReadFile(filePath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(updated) != content {
+		t.Fatalf("cancelled update changed file: %s", updated)
 	}
 }
 
@@ -534,8 +652,8 @@ func TestVerboseChecksStayConcurrentAndFlushLogsInDependencyOrder(t *testing.T) 
 	if len(result.Outdated) != len(dependencies) {
 		t.Fatalf("outdated = %#v", result.Outdated)
 	}
-	if registry.maximum.Load() < 2 {
-		t.Fatalf("maximum concurrent checks = %d", registry.maximum.Load())
+	if registry.maxActive.Load() < 2 {
+		t.Fatalf("maximum concurrent checks = %d", registry.maxActive.Load())
 	}
 	previousPosition := -1
 	for index := range dependencies {
@@ -544,6 +662,91 @@ func TestVerboseChecksStayConcurrentAndFlushLogsInDependencyOrder(t *testing.T) 
 			t.Fatalf("logs are not dependency-ordered: %q", logs.String())
 		}
 		previousPosition = position
+	}
+}
+
+func TestCheckOutdatedPreservesInputOrderAcrossFiles(t *testing.T) {
+	dependencies := []shared.Dependency{
+		{BaseDependency: shared.BaseDependency{Name: "first", OriginalVersion: "1.0.0", Type: shared.Dependencies, FilePath: "/project/packages/app/package.json"}, Version: "1.0.0"},
+		{BaseDependency: shared.BaseDependency{Name: "second", OriginalVersion: "1.0.0", Type: shared.Dependencies, FilePath: "/project/package.json"}, Version: "1.0.0"},
+		{BaseDependency: shared.BaseDependency{Name: "third", OriginalVersion: "1.0.0", Type: shared.Dependencies, FilePath: "/project/packages/app/package.json"}, Version: "1.0.0"},
+	}
+	registry := &concurrentLogRegistry{delays: map[string]time.Duration{
+		"first": 3 * time.Millisecond, "second": 2 * time.Millisecond, "third": time.Millisecond,
+	}}
+	var logs strings.Builder
+	var progressUpdates []shared.Progress
+	result, err := checkOutdatedWithRegistryClient(
+		context.Background(), dependencies, registry, shared.Options{}, "/project",
+		func(progress shared.Progress) { progressUpdates = append(progressUpdates, progress) },
+		func(format string, args ...any) { fmt.Fprintf(&logs, format, args...) }, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actualNames := make([]string, 0, len(result.Outdated))
+	for _, dependency := range result.Outdated {
+		actualNames = append(actualNames, dependency.Name)
+	}
+	if !reflect.DeepEqual(actualNames, []string{"first", "second", "third"}) {
+		t.Fatalf("outdated order = %#v", actualNames)
+	}
+	previousPosition := -1
+	for _, dependency := range dependencies {
+		position := strings.Index(logs.String(), "registry detail: "+dependency.Name)
+		if position <= previousPosition {
+			t.Fatalf("logs are not input-ordered: %q", logs.String())
+		}
+		previousPosition = position
+	}
+	if len(progressUpdates) != len(dependencies) {
+		t.Fatalf("progress updates = %#v", progressUpdates)
+	}
+	fileProgress := make(map[string][]int)
+	for _, progress := range progressUpdates {
+		fileProgress[progress.FilePath] = append(fileProgress[progress.FilePath], progress.FileCurrent)
+		if progress.FileTotal != len(groupedDependenciesForFile(dependencies, progress.FilePath)) {
+			t.Fatalf("file total for %s = %d", progress.FilePath, progress.FileTotal)
+		}
+	}
+	if !reflect.DeepEqual(fileProgress["/project/package.json"], []int{1}) || !reflect.DeepEqual(fileProgress["/project/packages/app/package.json"], []int{1, 2}) {
+		t.Fatalf("per-file progress = %#v", fileProgress)
+	}
+}
+
+func groupedDependenciesForFile(dependencies []shared.Dependency, filePath string) []shared.Dependency {
+	var grouped []shared.Dependency
+	for _, dependency := range dependencies {
+		if dependency.FilePath == filePath {
+			grouped = append(grouped, dependency)
+		}
+	}
+	return grouped
+}
+
+func TestCheckOutdatedStopsStartingWorkAfterCancellation(t *testing.T) {
+	dependencies := make([]shared.Dependency, 20)
+	for index := range dependencies {
+		dependencies[index] = shared.Dependency{
+			BaseDependency: shared.BaseDependency{Name: fmt.Sprintf("package-%d", index), OriginalVersion: "1.0.0", Type: shared.Dependencies, FilePath: "/project/package.json"},
+			Version:        "1.0.0",
+		}
+	}
+	registry := &cancellationRegistry{started: make(chan struct{}, len(dependencies))}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := checkOutdatedWithRegistryClient(ctx, dependencies, registry, shared.Options{}, "/project", nil, nil, nil)
+		result <- err
+	}()
+
+	<-registry.started
+	cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, expected cancellation", err)
+	}
+	if started := registry.count.Load(); started > maxConcurrentRegistryChecks {
+		t.Fatalf("started %d checks after cancellation; maximum initial workers is %d", started, maxConcurrentRegistryChecks)
 	}
 }
 
@@ -568,7 +771,7 @@ func TestConcurrentUpdatesToDifferentLinesDoNotLoseChanges(t *testing.T) {
 			go func() {
 				defer workers.Done()
 				<-start
-				errors <- UpdateDependencies(filePath, []shared.OutdatedDependency{update}, shared.Npm, shared.Options{}, filepath.Dir(filePath), nil)
+				errors <- UpdateDependencies(context.Background(), filePath, []shared.OutdatedDependency{update}, shared.NPM, shared.Options{}, filepath.Dir(filePath), nil)
 			}()
 		}
 		close(start)
@@ -599,7 +802,7 @@ func TestUpdateMinifiedDuplicateDependencyAcrossSections(t *testing.T) {
 		{BaseDependency: shared.BaseDependency{Name: "react", OriginalVersion: "^18.0.0", Type: shared.Dependencies, FilePath: filePath, LineNumber: 1}, CurrentVersion: "18.0.0", LatestVersion: "18.2.0"},
 		{BaseDependency: shared.BaseDependency{Name: "react", OriginalVersion: ">=16.0.0", Type: shared.DevDependencies, FilePath: filePath, LineNumber: 1}, CurrentVersion: "16.0.0", LatestVersion: "18.2.0"},
 	}
-	if err := UpdateDependencies(filePath, outdated, shared.Npm, shared.Options{}, filepath.Dir(filePath), nil); err != nil {
+	if err := UpdateDependencies(context.Background(), filePath, outdated, shared.NPM, shared.Options{}, filepath.Dir(filePath), nil); err != nil {
 		t.Fatal(err)
 	}
 	updated, err := os.ReadFile(filePath)

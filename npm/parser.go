@@ -26,12 +26,13 @@ type packageManifest struct {
 	PeerDependencies map[string]string `json:"peerDependencies"`
 }
 
-// NewParser creates a new npm parser
+// NewParser returns an npm parser. Set Parser.Log to receive optional diagnostics.
 func NewParser() *Parser {
 	return &Parser{}
 }
 
-// ParseDependencies parses a package.json file and extracts dependencies
+// ParseDependencies reads package.json dependencies selected by options.
+// In monorepo mode it also parses workspace manifests and logs malformed or missing workspace packages when Log is set.
 func (parser *Parser) ParseDependencies(filePath string, options shared.Options) ([]shared.Dependency, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -173,10 +174,10 @@ func (parser *Parser) parseWorkspaces(rootPath string, rootData []byte, rootMani
 			if info, err := os.Stat(match); err == nil && info.IsDir() {
 				packagePath := filepath.Join(match, "package.json")
 				if _, err := os.Stat(packagePath); err == nil {
-					wsData, err := os.ReadFile(packagePath)
+					workspaceData, err := os.ReadFile(packagePath)
 					if err != nil {
 						parser.log("Warning: failed to read workspace package %s: %v\n", packagePath, err)
-					} else if fileDependencies, err := parser.parseFile(packagePath, wsData, options); err == nil {
+					} else if fileDependencies, err := parser.parseFile(packagePath, workspaceData, options); err == nil {
 						all = append(all, fileDependencies...)
 					} else {
 						parser.log("Warning: failed to parse workspace package %s: %v\n", packagePath, err)
@@ -305,11 +306,6 @@ func extractWorkspacePatterns(workspacesRaw json.RawMessage) ([]string, error) {
 	}
 
 	return nil, fmt.Errorf("expected an array of strings or object with packages field")
-}
-
-// GetRegistryType returns the registry type this parser handles
-func (parser *Parser) GetRegistryType() shared.RegistryType {
-	return shared.Npm
 }
 
 // Ensure Parser implements the interface

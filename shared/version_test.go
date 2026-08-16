@@ -6,6 +6,25 @@ import (
 	"github.com/Masterminds/semver/v3"
 )
 
+func TestUnknownEnumStringsAreSafe(t *testing.T) {
+	tests := []struct {
+		name     string
+		actual   string
+		expected string
+	}{
+		{name: "dependency type", actual: DependencyType(99).String(), expected: "DependencyType(99)"},
+		{name: "registry type", actual: RegistryType(99).String(), expected: "RegistryType(99)"},
+		{name: "skip reason", actual: SkipReason(99).String(), expected: "SkipReason(99)"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.actual != test.expected {
+				t.Fatalf("String() = %q, expected %q", test.actual, test.expected)
+			}
+		})
+	}
+}
+
 func TestCleanVersion(t *testing.T) {
 	tests := []struct {
 		input    string
@@ -72,11 +91,11 @@ func TestGetVersionPrefix(t *testing.T) {
 
 func TestSemverVersionParsing(t *testing.T) {
 	tests := []struct {
-		input       string
-		expectedMaj uint64
-		expectedMin uint64
-		expectedPat uint64
-		hasError    bool
+		input         string
+		expectedMajor uint64
+		expectedMinor uint64
+		expectedPatch uint64
+		hasError      bool
 	}{
 		{"1.0.0", 1, 0, 0, false},
 		{"2.3.4", 2, 3, 4, false},
@@ -99,8 +118,8 @@ func TestSemverVersionParsing(t *testing.T) {
 		} else {
 			if err != nil {
 				t.Errorf("semver.NewVersion(%s) unexpected error: %v", test.input, err)
-			} else if result.Major() != test.expectedMaj || result.Minor() != test.expectedMin || result.Patch() != test.expectedPat {
-				t.Errorf("semver.NewVersion(%s) = %d.%d.%d, expected %d.%d.%d", test.input, result.Major(), result.Minor(), result.Patch(), test.expectedMaj, test.expectedMin, test.expectedPat)
+			} else if result.Major() != test.expectedMajor || result.Minor() != test.expectedMinor || result.Patch() != test.expectedPatch {
+				t.Errorf("semver.NewVersion(%s) = %d.%d.%d, expected %d.%d.%d", test.input, result.Major(), result.Minor(), result.Patch(), test.expectedMajor, test.expectedMinor, test.expectedPatch)
 			}
 		}
 	}

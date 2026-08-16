@@ -30,14 +30,24 @@ type dependencyCheckOutput struct {
 	logs   []string
 }
 
-// CheckOutdated checks which dependencies have newer versions available
-func CheckOutdated(ctx context.Context, dependencies []shared.Dependency, registryType shared.RegistryType, options shared.Options, workingDirectory string, progressCallback func(int, int), log shared.LogFunc) (*shared.CheckResult, error) {
+type indexedDependency struct {
+	index      int
+	dependency shared.Dependency
+}
+
+// CheckOutdated checks dependencies concurrently while preserving input order in the result.
+// It honors context cancellation, reports per-file and overall progress, derives workingDirectory when empty, and persists cache unless disabled.
+func CheckOutdated(ctx context.Context, dependencies []shared.Dependency, registryType shared.RegistryType, options shared.Options, workingDirectory string, progressCallback shared.ProgressFunc, log shared.LogFunc) (*shared.CheckResult, error) {
+
 	// Validate options against the registry's rules before doing any work
 	if err := ValidateOptions(registryType, options); err != nil {
 		return nil, err
 	}
 
-	workingDirectory = resolveWorkingDirectory(dependencies, workingDirectory)
+	workingDirectory, err := resolveWorkingDirectory(dependencies, workingDirectory)
+	if err != nil {
+		return nil, err
+	}
 
 	// Initialize cache if not disabled
 	var cache *shared.Cache
@@ -58,9 +68,9 @@ func CheckOutdated(ctx context.Context, dependencies []shared.Dependency, regist
 	return checkOutdatedWithRegistryClient(ctx, dependencies, registryClient, options, workingDirectory, progressCallback, log, cache)
 }
 
-func resolveWorkingDirectory(dependencies []shared.Dependency, workingDirectory string) string {
+func resolveWorkingDirectory(dependencies []shared.Dependency, workingDirectory string) (string, error) {
 	if workingDirectory != "" {
-		return workingDirectory
+		return workingDirectory, nil
 	}
 
 	filePaths := make([]string, 0, len(dependencies))
@@ -77,17 +87,20 @@ func resolveWorkingDirectory(dependencies []shared.Dependency, workingDirectory 
 	}
 	shared.SortFilesByDepth(filePaths)
 	if len(filePaths) > 0 {
-		return filepath.Dir(filePaths[0])
+		return filepath.Dir(filePaths[0]), nil
 	}
 
-	workingDirectory, _ = os.Getwd()
-	return workingDirectory
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve working directory: %w", err)
+	}
+	return workingDirectory, nil
 }
 
-func checkOutdatedWithRegistryClient(ctx context.Context, dependencies []shared.Dependency, registryClient shared.RegistryClient, options shared.Options, workingDirectory string, progressCallback func(int, int), log shared.LogFunc, cache *shared.Cache) (*shared.CheckResult, error) {
-	grouped := make(map[string][]shared.Dependency)
-	for _, dependency := range dependencies {
-		grouped[dependency.FilePath] = append(grouped[dependency.FilePath], dependency)
+func checkOutdatedWithRegistryClient(ctx context.Context, dependencies []shared.Dependency, registryClient shared.RegistryClient, options shared.Options, workingDirectory string, progressCallback shared.ProgressFunc, log shared.LogFunc, cache *shared.Cache) (*shared.CheckResult, error) {
+	grouped := make(map[string][]indexedDependency)
+	for index, dependency := range dependencies {
+		grouped[dependency.FilePath] = append(grouped[dependency.FilePath], indexedDependency{index: index, dependency: dependency})
 	}
 
 	filePaths := make([]string, 0, len(grouped))
@@ -99,44 +112,62 @@ func checkOutdatedWithRegistryClient(ctx context.Context, dependencies []shared.
 	var result checkResult
 	processedDependencies := 0
 	totalDependencies := len(dependencies)
+	outputsByIndex := make([]dependencyCheckOutput, len(dependencies))
 
 	for _, file := range filePaths {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("dependency checks cancelled before checking %s: %w", file, err)
 		}
 		fileDependencies := grouped[file]
-		displayPath := file
-		if relativePath, err := filepath.Rel(workingDirectory, file); err == nil {
-			displayPath = relativePath
-		}
-		dependencyWord := "dependencies"
-		if len(fileDependencies) == 1 {
-			dependencyWord = "dependency"
-		}
-
-		if log != nil {
-			log("Checking %s (%d %s)\n", displayPath, len(fileDependencies), dependencyWord)
-		}
-
-		outputs := checkFileDependencies(ctx, fileDependencies, registryClient, options, cache, func(output dependencyCheckOutput) {
+		processedFileDependencies := 0
+		outputs, err := checkFileDependencies(ctx, fileDependencies, registryClient, options, cache, func(output dependencyCheckOutput) {
+			processedFileDependencies++
 			processedDependencies++
 			if progressCallback != nil {
-				progressCallback(processedDependencies, totalDependencies)
+				progressCallback(shared.Progress{
+					FilePath:    file,
+					FileCurrent: processedFileDependencies,
+					FileTotal:   len(fileDependencies),
+					Current:     processedDependencies,
+					Total:       totalDependencies,
+				})
 			}
 		})
-		for _, output := range outputs {
-			if log != nil {
-				for _, message := range output.logs {
-					log("%s", message)
-				}
-			}
-			result.outdated = append(result.outdated, output.result.outdated...)
-			result.errors = append(result.errors, output.result.errors...)
-			result.semverSkipped = append(result.semverSkipped, output.result.semverSkipped...)
-		}
-		if err := ctx.Err(); err != nil {
+		if err != nil {
 			return nil, err
 		}
+		for _, output := range outputs {
+			outputsByIndex[output.index] = output
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("dependency checks cancelled after checking %s: %w", file, err)
+		}
+	}
+
+	loggedFiles := make(map[string]struct{}, len(grouped))
+	for index, dependency := range dependencies {
+		if log != nil {
+			if _, logged := loggedFiles[dependency.FilePath]; !logged {
+				displayPath := dependency.FilePath
+				if relativePath, err := filepath.Rel(workingDirectory, dependency.FilePath); err == nil {
+					displayPath = relativePath
+				}
+				dependencyCount := len(grouped[dependency.FilePath])
+				dependencyWord := "dependencies"
+				if dependencyCount == 1 {
+					dependencyWord = "dependency"
+				}
+				log("Checking %s (%d %s)\n", displayPath, dependencyCount, dependencyWord)
+				loggedFiles[dependency.FilePath] = struct{}{}
+			}
+			for _, message := range outputsByIndex[index].logs {
+				log("%s", message)
+			}
+		}
+		output := outputsByIndex[index]
+		result.outdated = append(result.outdated, output.result.outdated...)
+		result.errors = append(result.errors, output.result.errors...)
+		result.semverSkipped = append(result.semverSkipped, output.result.semverSkipped...)
 	}
 
 	// Save cache if it was used
@@ -156,13 +187,13 @@ func checkOutdatedWithRegistryClient(ctx context.Context, dependencies []shared.
 	}, nil
 }
 
-func checkFileDependencies(ctx context.Context, dependencies []shared.Dependency, registryClient shared.RegistryClient, options shared.Options, cache *shared.Cache, onComplete func(dependencyCheckOutput)) []dependencyCheckOutput {
+func checkFileDependencies(ctx context.Context, dependencies []indexedDependency, registryClient shared.RegistryClient, options shared.Options, cache *shared.Cache, onComplete func(output dependencyCheckOutput)) ([]dependencyCheckOutput, error) {
 	if len(dependencies) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	workerCount := min(len(dependencies), maxConcurrentRegistryChecks)
-	jobs := make(chan int)
+	jobs := make(chan indexedDependency)
 	completed := make(chan dependencyCheckOutput, len(dependencies))
 	var workers sync.WaitGroup
 
@@ -170,40 +201,64 @@ func checkFileDependencies(ctx context.Context, dependencies []shared.Dependency
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			for index := range jobs {
+			for {
+				var indexed indexedDependency
+				var ok bool
+				select {
+				case <-ctx.Done():
+					return
+				case indexed, ok = <-jobs:
+					if !ok {
+						return
+					}
+				}
+				if ctx.Err() != nil {
+					return
+				}
 				var result checkResult
 				var logs []string
 				captureLog := func(format string, args ...any) {
 					logs = append(logs, fmt.Sprintf(format, args...))
 				}
 				dependencyContext := shared.ContextWithLog(ctx, captureLog)
-				checkSingleDependency(dependencyContext, dependencies[index], registryClient, options, cache, &result, captureLog)
-				completed <- dependencyCheckOutput{index: index, result: result, logs: logs}
+				checkSingleDependency(dependencyContext, indexed.dependency, registryClient, options, cache, &result, captureLog)
+				completed <- dependencyCheckOutput{index: indexed.index, result: result, logs: logs}
 			}
 		}()
 	}
 
 	go func() {
-		for index := range dependencies {
-			jobs <- index
+		for _, dependency := range dependencies {
+			select {
+			case <-ctx.Done():
+				close(jobs)
+				workers.Wait()
+				close(completed)
+				return
+			case jobs <- dependency:
+			}
 		}
 		close(jobs)
 		workers.Wait()
 		close(completed)
 	}()
 
-	outputs := make([]dependencyCheckOutput, len(dependencies))
+	outputs := make([]dependencyCheckOutput, 0, len(dependencies))
 	for output := range completed {
-		outputs[output.index] = output
+		outputs = append(outputs, output)
 		if onComplete != nil {
 			onComplete(output)
 		}
 	}
-	return outputs
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("dependency checks cancelled: %w", err)
+	}
+	return outputs, nil
 }
 
 // checkSingleDependency checks a single dependency for updates and appends results
 func checkSingleDependency(ctx context.Context, dependency shared.Dependency, registryClient shared.RegistryClient, options shared.Options, cache *shared.Cache, result *checkResult, log shared.LogFunc) {
+
 	// Skip complex dependencies (git, path, workspace, etc.)
 	if isNonRegistryDependency(dependency) {
 		if log != nil {
@@ -230,8 +285,15 @@ func checkSingleDependency(ctx context.Context, dependency shared.Dependency, re
 
 	absoluteLatest, constraintLatest, err := fetchLatestVersions(ctx, dependency, registryClient, options, cache)
 	if err != nil {
+		if errors.Is(err, shared.ErrNoVersionsMeetMinimumReleaseAge) {
+			if log != nil {
+				log("No versions of %s are more than 24 hours old\n", dependency.Name)
+			}
+			return
+		}
+
 		// If constraint error, use the absolute latest already returned for semver skipped
-		if errors.Is(err, shared.ErrNoVersionsSatisfyConstraint) && absoluteLatest != "" {
+		if errors.Is(err, shared.ErrNoVersionsSatisfyConstraint) && absoluteLatest != "" && isNewerVersion(dependency.Version, absoluteLatest) {
 			result.semverSkipped = append(result.semverSkipped, shared.SemverSkipped{
 				OutdatedDependency: shared.OutdatedDependency{
 					BaseDependency: dependency.BaseDependency,
@@ -242,6 +304,7 @@ func checkSingleDependency(ctx context.Context, dependency shared.Dependency, re
 			})
 			return
 		}
+
 		// If constraint error for hardcoded pre-release, treat as up-to-date
 		if errors.Is(err, shared.ErrNoVersionsSatisfyConstraint) {
 			if log != nil {
@@ -262,7 +325,7 @@ func checkSingleDependency(ctx context.Context, dependency shared.Dependency, re
 	currentVersion := dependency.Version
 
 	// Check if there's an update available
-	if currentVersion != constraintLatest && constraintLatest != "" {
+	if constraintLatest != "" && isNewerVersion(currentVersion, constraintLatest) {
 		result.outdated = append(result.outdated, shared.OutdatedDependency{
 			BaseDependency: dependency.BaseDependency,
 			CurrentVersion: currentVersion,
@@ -271,7 +334,7 @@ func checkSingleDependency(ctx context.Context, dependency shared.Dependency, re
 	}
 
 	// Add to semverSkipped if the absolute latest differs from the constraint-compatible latest
-	if absoluteLatest != constraintLatest && absoluteLatest != "" {
+	if absoluteLatest != constraintLatest && absoluteLatest != "" && isNewerVersion(currentVersion, absoluteLatest) {
 		result.semverSkipped = append(result.semverSkipped, shared.SemverSkipped{
 			OutdatedDependency: shared.OutdatedDependency{
 				BaseDependency: dependency.BaseDependency,
@@ -281,6 +344,12 @@ func checkSingleDependency(ctx context.Context, dependency shared.Dependency, re
 			Reason: shared.IncompatibleWithConstraint,
 		})
 	}
+}
+
+func isNewerVersion(currentVersion, candidateVersion string) bool {
+	current, currentErr := semver.NewVersion(currentVersion)
+	candidate, candidateErr := semver.NewVersion(candidateVersion)
+	return currentErr == nil && candidateErr == nil && candidate.GreaterThan(current)
 }
 
 func isNonRegistryDependency(dependency shared.Dependency) bool {
@@ -298,6 +367,7 @@ func isNonRegistryDependency(dependency shared.Dependency) bool {
 
 // fetchLatestVersions determines the appropriate strategy and fetches version info
 func fetchLatestVersions(ctx context.Context, dependency shared.Dependency, registryClient shared.RegistryClient, options shared.Options, cache *shared.Cache) (absoluteLatest, constraintLatest string, err error) {
+
 	// If semver flag is enabled and we have a prefixed version, get both versions in one call
 	if options.Semver && shared.HasSemanticPrefix(dependency.OriginalVersion) {
 		return registryClient.GetBothLatestVersions(ctx, dependency.Name, dependency.OriginalVersion, dependency.HostedURL, options, cache)
@@ -317,11 +387,25 @@ func fetchLatestVersions(ctx context.Context, dependency shared.Dependency, regi
 	return latest, latest, nil
 }
 
-// UpdateDependencies validates every target before applying atomic per-file
-// replacements. Overlapping calls are serialized for their complete transaction.
-func UpdateDependencies(filePath string, outdated []shared.OutdatedDependency, registryType shared.RegistryType, options shared.Options, workingDirectory string, log shared.LogFunc) error {
+// UpdateDependencies validates every target before applying atomic per-file replacements.
+// Overlapping calls are serialized across goroutines and processes for their complete transaction, and context cancellation is checked before each prepare and apply.
+// A multi-file update is not transactional: an apply failure can leave earlier files updated.
+func UpdateDependencies(ctx context.Context, filePath string, outdated []shared.OutdatedDependency, registryType shared.RegistryType, options shared.Options, workingDirectory string, log shared.LogFunc) error {
+	if len(outdated) == 0 {
+		return nil
+	}
+	if workingDirectory == "" {
+		var err error
+		workingDirectory, err = os.Getwd()
+		if err != nil {
+			return fmt.Errorf("failed to resolve working directory: %w", err)
+		}
+	}
 	byFile := make(map[string][]shared.OutdatedDependency)
 	for _, dependency := range outdated {
+		if !isSupportedDependencyType(dependency.Type) {
+			return fmt.Errorf("unsupported dependency type: %d", dependency.Type)
+		}
 		path := dependency.FilePath
 		if path == "" {
 			path = filePath
@@ -347,17 +431,26 @@ func UpdateDependencies(filePath string, outdated []shared.OutdatedDependency, r
 		filePaths = append(filePaths, path)
 	}
 	shared.SortFilesByDepth(filePaths)
-	unlockFiles := lockDependencyFiles(filePaths)
+	unlockFiles, err := lockDependencyFiles(ctx, filePaths)
+	if err != nil {
+		return err
+	}
 	defer unlockFiles()
 
 	showFilenames := len(filePaths) > 1
 	preparedUpdates := make(map[string]*shared.PreparedFileUpdate, len(filePaths))
 
 	for _, path := range filePaths {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("dependency update cancelled before preparing %s: %w", path, err)
+		}
 		dependencies := byFile[path]
 		prepared, err := shared.PrepareDependenciesInFile(path, dependencies, patternProvider)
 		if err != nil {
 			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("dependency update cancelled after preparing %s: %w", path, err)
 		}
 		if prepared != nil {
 			preparedUpdates[path] = prepared
@@ -365,6 +458,9 @@ func UpdateDependencies(filePath string, outdated []shared.OutdatedDependency, r
 	}
 
 	for _, path := range filePaths {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("dependency update cancelled before applying %s: %w", path, err)
+		}
 		dependencies := byFile[path]
 		prepared := preparedUpdates[path]
 		if prepared == nil {
@@ -377,11 +473,7 @@ func UpdateDependencies(filePath string, outdated []shared.OutdatedDependency, r
 			log("\n")
 			if showFilenames {
 				displayPath := path
-				effectiveWorkingDirectory := workingDirectory
-				if effectiveWorkingDirectory == "" {
-					effectiveWorkingDirectory, _ = os.Getwd()
-				}
-				if relativePath, err := filepath.Rel(effectiveWorkingDirectory, path); err == nil {
+				if relativePath, err := filepath.Rel(workingDirectory, path); err == nil {
 					displayPath = relativePath
 				}
 				log("%s:\n", displayPath)
@@ -402,7 +494,7 @@ func UpdateDependencies(filePath string, outdated []shared.OutdatedDependency, r
 // getRegistryClient returns the appropriate registry client for the given registry type
 func getRegistryClient(registryType shared.RegistryType, workingDirectory string, log shared.LogFunc) (shared.RegistryClient, error) {
 	switch registryType {
-	case shared.Npm:
+	case shared.NPM:
 		client := npm.NewRegistryClient()
 		client.Log = log
 		client.ConfigDirectory = workingDirectory
@@ -412,13 +504,12 @@ func getRegistryClient(registryType shared.RegistryType, workingDirectory string
 		client.Log = log
 		return client, nil
 	default:
-		return nil, fmt.Errorf("unsupported registry type: %s", registryType)
+		return nil, fmt.Errorf("%w: %d", shared.ErrUnsupportedRegistryType, registryType)
 	}
 }
 
-// ValidateOptions validates the given options against the rules for the registry type.
-// It is the single source of truth for registry-specific option validation and is used
-// by both CheckOutdated and UpdateDependencies, and can be called by frontends for early validation.
+// ValidateOptions rejects options unsupported by registryType.
+// It is the same validation used by CheckOutdated and UpdateDependencies and can be called by frontends before starting work.
 func ValidateOptions(registryType shared.RegistryType, options shared.Options) error {
 	registryUpdater, err := getUpdater(registryType)
 	if err != nil {
@@ -430,11 +521,20 @@ func ValidateOptions(registryType shared.RegistryType, options shared.Options) e
 // getUpdater returns the appropriate updater for the given registry type
 func getUpdater(registryType shared.RegistryType) (shared.Updater, error) {
 	switch registryType {
-	case shared.Npm:
+	case shared.NPM:
 		return npm.NewUpdater(), nil
 	case shared.Pub:
 		return pub.NewUpdater(), nil
 	default:
-		return nil, fmt.Errorf("unsupported registry type: %s", registryType)
+		return nil, fmt.Errorf("%w: %d", shared.ErrUnsupportedRegistryType, registryType)
+	}
+}
+
+func isSupportedDependencyType(dependencyType shared.DependencyType) bool {
+	switch dependencyType {
+	case shared.Dependencies, shared.DevDependencies, shared.PeerDependencies:
+		return true
+	default:
+		return false
 	}
 }
