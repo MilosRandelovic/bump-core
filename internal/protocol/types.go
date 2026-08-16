@@ -2,8 +2,9 @@ package protocol
 
 import (
 	"encoding/json"
+	"fmt"
 
-	"github.com/MilosRandelovic/bump-core/shared"
+	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
 
 // Request represents an incoming JSON-RPC-like request over stdin
@@ -13,25 +14,41 @@ type Request struct {
 	Params json.RawMessage `json:"params,omitempty"`
 }
 
+// ErrorCode is a stable machine-readable protocol error identifier.
+type ErrorCode string
+
+const (
+	// ErrorCodeRequestLimitExceeded indicates that the client may retry after an active request completes.
+	ErrorCodeRequestLimitExceeded ErrorCode = "request_limit_exceeded"
+)
+
 // Response represents a JSON response sent over stdout
 type Response struct {
-	ID     int         `json:"id,omitempty"`
+	ID     int         `json:"id"`
 	Type   string      `json:"type"`
 	Result interface{} `json:"result,omitempty"`
+	Code   ErrorCode   `json:"code,omitempty"`
 	Error  string      `json:"error,omitempty"`
 }
 
 // LogMessage is an out-of-band log message sent during processing
 type LogMessage struct {
 	Type    string `json:"type"`
+	ID      int    `json:"id"`
 	Message string `json:"message"`
 }
 
 // ProgressMessage is an out-of-band progress update sent during processing
 type ProgressMessage struct {
 	Type    string `json:"type"`
+	ID      int    `json:"id"`
 	Current int    `json:"current"`
 	Total   int    `json:"total"`
+}
+
+// CancelParams identifies an active request to cancel.
+type CancelParams struct {
+	ID *int `json:"id"`
 }
 
 // DetectParams are the parameters for the "detect" method
@@ -111,6 +128,11 @@ type UpdateResult struct {
 	Updated int `json:"updated"`
 }
 
+// CancelResult reports whether the target request was active.
+type CancelResult struct {
+	Cancelled bool `json:"cancelled"`
+}
+
 // ToOptions converts OptionsParams to shared.Options
 func (o OptionsParams) ToOptions() shared.Options {
 	return shared.Options{
@@ -166,16 +188,20 @@ func FromCheckResult(checkResult *shared.CheckResult) *CheckResult {
 	return result
 }
 
-// ToOutdatedDependencies converts protocol OutdatedDependencyInfo slice to shared.OutdatedDependency slice
-func ToOutdatedDependencies(infos []OutdatedDependencyInfo) []shared.OutdatedDependency {
+// ToOutdatedDependencies converts protocol OutdatedDependencyInfo slice to shared.OutdatedDependency slice.
+func ToOutdatedDependencies(infos []OutdatedDependencyInfo) ([]shared.OutdatedDependency, error) {
 	result := make([]shared.OutdatedDependency, 0, len(infos))
 	for _, info := range infos {
-		dependencyType := shared.Dependencies
+		var dependencyType shared.DependencyType
 		switch info.Type {
+		case "dependencies":
+			dependencyType = shared.Dependencies
 		case "devDependencies":
 			dependencyType = shared.DevDependencies
 		case "peerDependencies":
 			dependencyType = shared.PeerDependencies
+		default:
+			return nil, fmt.Errorf("unsupported dependency type %q for %s", info.Type, info.Name)
 		}
 		result = append(result, shared.OutdatedDependency{
 			BaseDependency: shared.BaseDependency{
@@ -190,7 +216,7 @@ func ToOutdatedDependencies(infos []OutdatedDependencyInfo) []shared.OutdatedDep
 			LatestVersion:  info.LatestVersion,
 		})
 	}
-	return result
+	return result, nil
 }
 
 // ParseRegistryType converts a string to shared.RegistryType

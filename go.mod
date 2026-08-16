@@ -1,4 +1,4 @@
-module github.com/MilosRandelovic/bump-core
+module github.com/MilosRandelovic/bump-core/v2
 
 go 1.26.1
 

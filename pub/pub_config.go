@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/MilosRandelovic/bump-core/shared"
+	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
 
 // PubConfig holds configuration for pub registries
@@ -22,7 +22,7 @@ type RegistryConfig struct {
 
 // parsePubConfig parses pub configuration from various sources
 // This mimics how pub handles registry configuration
-func parsePubConfig() (*PubConfig, error) {
+func parsePubConfig(log shared.LogFunc) (*PubConfig, error) {
 	config := &PubConfig{
 		Registries: make(map[string]RegistryConfig),
 	}
@@ -34,7 +34,9 @@ func parsePubConfig() (*PubConfig, error) {
 
 	// Try to parse from pub-tokens.json (dart pub token add)
 	if err := parsePubTokensConfig(config); err != nil {
-		// Silently ignore errors - pub-tokens.json is optional
+		if log != nil {
+			log("Warning: Could not load pub authentication tokens: %v\n", err)
+		}
 	}
 
 	return config, nil
@@ -42,13 +44,13 @@ func parsePubConfig() (*PubConfig, error) {
 
 // parsePubTokensConfig reads authentication tokens from dart pub cache
 func parsePubTokensConfig(config *PubConfig) error {
-	homeDir, err := os.UserHomeDir()
+	configDir, err := os.UserConfigDir()
 	if err != nil {
 		return err
 	}
 
 	// Check for pub-tokens.json file where dart pub token add stores credentials
-	pubTokensPath := filepath.Join(homeDir, "Library", "Application Support", "dart", "pub-tokens.json")
+	pubTokensPath := filepath.Join(configDir, "dart", "pub-tokens.json")
 	if _, err := os.Stat(pubTokensPath); os.IsNotExist(err) {
 		return nil // File doesn't exist, that's okay
 	}

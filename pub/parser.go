@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/MilosRandelovic/bump-core/shared"
+	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
 
 // Parser handles Dart pubspec.yaml parsing
@@ -38,105 +38,103 @@ func (parser *Parser) ParseDependencies(filePath string, options shared.Options)
 	var currentSection shared.DependencyType
 	var inSection bool
 	var currentPackage *packageInfo
+	sectionIndent := -1
+	packageIndent := -1
+	sectionEntries := 0
+
+	finalizePackage := func() {
+		if currentPackage == nil {
+			return
+		}
+		if dependency := currentPackage.toDependency(currentSection, filePath); dependency != nil {
+			dependencies = append(dependencies, *dependency)
+		}
+		currentPackage = nil
+	}
+	finalizeSection := func() {
+		finalizePackage()
+		if inSection && sectionEntries == 0 {
+			parser.log("Warning: %s section contains no dependency entries\n", currentSection.String())
+		}
+		inSection = false
+		sectionIndent = -1
+		packageIndent = -1
+		sectionEntries = 0
+	}
 
 	for lineNumber, line := range lines {
 		trimmedLine := strings.TrimSpace(line)
 		indent := getIndentation(line)
+		sectionLine := strings.TrimSpace(stripInlineComment(trimmedLine))
 
 		// Check if we're entering a dependency section
-		if strings.HasPrefix(trimmedLine, "dependencies:") {
-			// Finalize any pending package from previous section
-			if currentPackage != nil {
-				if dependency := currentPackage.toDependency(currentSection, filePath); dependency != nil {
-					dependencies = append(dependencies, *dependency)
-				}
-			}
+		if sectionLine == "dependencies:" {
+			finalizeSection()
 			currentSection = shared.Dependencies
 			inSection = true
-			currentPackage = nil
+			sectionIndent = indent
 			continue
-		} else if strings.HasPrefix(trimmedLine, "dev_dependencies:") {
-			// Finalize any pending package from previous section
-			if currentPackage != nil {
-				if dependency := currentPackage.toDependency(currentSection, filePath); dependency != nil {
-					dependencies = append(dependencies, *dependency)
-				}
-			}
+		} else if sectionLine == "dev_dependencies:" {
+			finalizeSection()
 			currentSection = shared.DevDependencies
 			inSection = true
-			currentPackage = nil
+			sectionIndent = indent
 			continue
 		}
 
-		// Check if we're leaving a section (non-indented line that's not a comment)
-		if inSection && len(line) > 0 && line[0] != ' ' && line[0] != '\t' && trimmedLine != "" && !strings.HasPrefix(trimmedLine, "#") {
-			// Finalize any pending package
-			if currentPackage != nil {
-				if dependency := currentPackage.toDependency(currentSection, filePath); dependency != nil {
-					dependencies = append(dependencies, *dependency)
-				}
-				currentPackage = nil
-			}
-			inSection = false
+		if !inSection || trimmedLine == "" || strings.HasPrefix(trimmedLine, "#") {
+			continue
 		}
 
-		// If we're in a section, look for dependency definitions
-		if inSection && len(line) > 0 && (line[0] == ' ' || line[0] == '\t') && !strings.HasPrefix(trimmedLine, "#") && strings.Contains(trimmedLine, ":") {
-			parts := strings.SplitN(trimmedLine, ":", 2)
-			if len(parts) == 2 {
-				key := strings.TrimSpace(parts[0])
-				value := strings.TrimSpace(parts[1])
+		// A non-comment mapping at the section's indentation (or less) ends it.
+		if indent <= sectionIndent {
+			finalizeSection()
+			continue
+		}
 
-				// Check if this is a top-level package name (2 spaces indentation)
-				if indent == 2 {
-					// Finalize previous package if any
-					if currentPackage != nil {
-						if dependency := currentPackage.toDependency(currentSection, filePath); dependency != nil {
-							dependencies = append(dependencies, *dependency)
-						}
-					}
+		parts := strings.SplitN(trimmedLine, ":", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		value := strings.TrimSpace(parts[1])
 
-					// Start new package
-					currentPackage = &packageInfo{
-						name:       key,
-						lineNumber: lineNumber + 1,
-					}
+		// YAML permits any consistent indentation width. The first mapping key in
+		// the section establishes the package indentation for that section.
+		if packageIndent == -1 || indent < packageIndent {
+			packageIndent = indent
+		}
+		if indent == packageIndent {
+			finalizePackage()
+			sectionEntries++
+			currentPackage = &packageInfo{name: key, lineNumber: lineNumber + 1}
+			if value != "" {
+				currentPackage.version = cleanQuotes(value)
+			}
+			continue
+		}
 
-					if value != "" {
-						// Simple dependency (name: version)
-						currentPackage.version = cleanQuotes(value)
-					}
-				} else if indent >= 4 {
-					// This is a sub-property of the current package (4+ spaces indentation)
-					if currentPackage != nil {
-						switch key {
-						case "version":
-							currentPackage.version = cleanQuotes(value)
-							currentPackage.versionLineNumber = lineNumber + 1
-						case "hosted":
-							currentPackage.inHostedBlock = value == ""
-							if value != "" {
-								currentPackage.hostedURL = cleanQuotes(value)
-							}
-						case "url":
-							if currentPackage.inHostedBlock && indent >= 6 {
-								currentPackage.hostedURL = cleanQuotes(value)
-							}
-						case "sdk":
-							currentPackage.sdk = value
-						}
-					}
+		if currentPackage != nil && indent > packageIndent {
+			switch key {
+			case "version":
+				currentPackage.version = cleanQuotes(value)
+				currentPackage.versionLineNumber = lineNumber + 1
+			case "hosted":
+				currentPackage.inHostedBlock = value == ""
+				if value != "" {
+					currentPackage.hostedURL = cleanQuotes(value)
 				}
+			case "url":
+				if currentPackage.inHostedBlock {
+					currentPackage.hostedURL = cleanQuotes(value)
+				}
+			case "sdk":
+				currentPackage.sdk = value
 			}
 		}
 	}
 
-	// Finalize any pending package
-	if currentPackage != nil {
-		if dependency := currentPackage.toDependency(currentSection, filePath); dependency != nil {
-			dependencies = append(dependencies, *dependency)
-		}
-	}
+	finalizeSection()
 
 	return dependencies, nil
 }
@@ -190,12 +188,33 @@ func (info *packageInfo) toDependency(section shared.DependencyType, filePath st
 
 // cleanQuotes removes surrounding quotes from a string
 func cleanQuotes(s string) string {
-	s = strings.TrimSpace(s)
+	s = strings.TrimSpace(stripInlineComment(s))
 	if (strings.HasPrefix(s, `"`) && strings.HasSuffix(s, `"`)) ||
 		(strings.HasPrefix(s, `'`) && strings.HasSuffix(s, `'`)) {
 		return s[1 : len(s)-1]
 	}
 	return s
+}
+
+func stripInlineComment(value string) string {
+	var quote byte
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if quote != 0 {
+			if character == quote && (index == 0 || value[index-1] != '\\') {
+				quote = 0
+			}
+			continue
+		}
+		if character == '\'' || character == '"' {
+			quote = character
+			continue
+		}
+		if character == '#' && (index == 0 || value[index-1] == ' ' || value[index-1] == '\t') {
+			return strings.TrimSpace(value[:index])
+		}
+	}
+	return value
 }
 
 func getIndentation(line string) int {

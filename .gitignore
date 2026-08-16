@@ -13,5 +13,5 @@ go.work
 .DS_Store
 
 # Package files for testing
-package*.json
-pubspec*.yaml
+/package*.json
+/pubspec*.yaml
