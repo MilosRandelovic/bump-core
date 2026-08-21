@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +17,7 @@ import (
 
 type failingWriter struct{}
 
-func (failingWriter) Write([]byte) (int, error) {
+func (failingWriter) Write(data []byte) (int, error) {
 	return 0, errors.New("write failed")
 }
 
@@ -89,10 +90,13 @@ func TestServerCheckWiresVerboseLogsAndGlobalProgress(t *testing.T) {
 		"params": map[string]any{
 			"filePath":     filePath,
 			"registryType": "npm",
-			"options":      map[string]any{"verbose": true, "noCache": true},
+			"options":      map[string]any{"verbose": true, "noCache": true, "minimumAge": true},
 		},
 	}, func(server *Server) {
-		server.parseDependencies = func(_ string, _ shared.RegistryType, _ shared.Options, log shared.LogFunc) ([]shared.Dependency, error) {
+		server.parseDependencies = func(filePath string, registryType shared.RegistryType, options shared.Options, log shared.LogFunc) ([]shared.Dependency, error) {
+			if !options.EnforceMinimumReleaseAge {
+				return nil, fmt.Errorf("minimum age was not wired to parsing")
+			}
 			if log == nil {
 				return nil, fmt.Errorf("parser log was not wired")
 			}
@@ -102,8 +106,11 @@ func TestServerCheckWiresVerboseLogsAndGlobalProgress(t *testing.T) {
 				Version:        "1.0.0",
 			}}, nil
 		}
-		server.checkOutdated = func(_ context.Context, dependencies []shared.Dependency, _ shared.RegistryType, _ shared.Options, _ string, progress func(int, int), log shared.LogFunc) (*shared.CheckResult, error) {
-			progress(1, len(dependencies))
+		server.checkOutdated = func(ctx context.Context, dependencies []shared.Dependency, registryType shared.RegistryType, options shared.Options, workingDirectory string, progress shared.ProgressFunc, log shared.LogFunc) (*shared.CheckResult, error) {
+			if !options.EnforceMinimumReleaseAge {
+				return nil, fmt.Errorf("minimum age was not wired to registry checks")
+			}
+			progress(shared.Progress{FilePath: filePath, FileCurrent: 1, FileTotal: len(dependencies), Current: 1, Total: len(dependencies)})
 			log("registry detail")
 			return &shared.CheckResult{Outdated: []shared.OutdatedDependency{{
 				BaseDependency: dependencies[0].BaseDependency,
@@ -121,6 +128,17 @@ func TestServerCheckWiresVerboseLogsAndGlobalProgress(t *testing.T) {
 		if got := messageType(t, messages[index]); got != expected {
 			t.Fatalf("message %d type = %q, expected %q", index, got, expected)
 		}
+	}
+	var progressMessage ProgressMessage
+	progressData, err := json.Marshal(messages[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(progressData, &progressMessage); err != nil {
+		t.Fatal(err)
+	}
+	if progressMessage.FilePath != filePath || progressMessage.FileCurrent != 1 || progressMessage.FileTotal != 1 || progressMessage.Current != 1 || progressMessage.Total != 1 {
+		t.Fatalf("unexpected progress message: %#v", progressMessage)
 	}
 }
 
@@ -207,10 +225,10 @@ func TestServerCancelsActiveCheck(t *testing.T) {
 	var output bytes.Buffer
 	input := strings.NewReader(string(checkRequest) + "\n" + string(cancelRequest) + "\n")
 	server := NewServerWithIO(input, &output)
-	server.parseDependencies = func(string, shared.RegistryType, shared.Options, shared.LogFunc) ([]shared.Dependency, error) {
+	server.parseDependencies = func(filePath string, registryType shared.RegistryType, options shared.Options, log shared.LogFunc) ([]shared.Dependency, error) {
 		return []shared.Dependency{{BaseDependency: shared.BaseDependency{Name: "example"}, Version: "1.0.0"}}, nil
 	}
-	server.checkOutdated = func(ctx context.Context, _ []shared.Dependency, _ shared.RegistryType, _ shared.Options, _ string, _ func(int, int), _ shared.LogFunc) (*shared.CheckResult, error) {
+	server.checkOutdated = func(ctx context.Context, dependencies []shared.Dependency, registryType shared.RegistryType, options shared.Options, workingDirectory string, progress shared.ProgressFunc, log shared.LogFunc) (*shared.CheckResult, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}
@@ -239,6 +257,138 @@ func TestServerCancelsActiveCheck(t *testing.T) {
 	}
 }
 
+func TestServerRejectsCancelRequestWithActiveID(t *testing.T) {
+	messages := runProtocol(t, map[string]any{
+		"method": "cancel",
+		"id":     41,
+		"params": map[string]any{"id": 41},
+	}, func(server *Server) {
+		server.activeRequests[41] = func() {}
+	})
+	if len(messages) != 1 || messageType(t, messages[0]) != "error" || !strings.Contains(string(messages[0]["error"]), "already active") {
+		t.Fatalf("unexpected messages: %#v", messages)
+	}
+}
+
+func TestServerCancelsActiveUpdate(t *testing.T) {
+	updateRequest, err := json.Marshal(map[string]any{
+		"method": "update",
+		"id":     51,
+		"params": map[string]any{
+			"filePath": "/tmp/package.json", "registryType": "npm", "options": map[string]any{}, "outdated": []any{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelRequest, err := json.Marshal(map[string]any{
+		"method": "cancel",
+		"id":     52,
+		"params": map[string]any{"id": 51},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	server := NewServerWithIO(strings.NewReader(string(updateRequest)+"\n"+string(cancelRequest)+"\n"), &output)
+	server.updateDependencies = func(ctx context.Context, filePath string, outdated []shared.OutdatedDependency, registryType shared.RegistryType, options shared.Options, workingDirectory string, log shared.LogFunc) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	if err := server.Run(); err != nil {
+		t.Fatal(err)
+	}
+
+	decoder := json.NewDecoder(&output)
+	responses := make(map[int]map[string]json.RawMessage)
+	for decoder.More() {
+		var message map[string]json.RawMessage
+		if err := decoder.Decode(&message); err != nil {
+			t.Fatal(err)
+		}
+		var id int
+		if err := json.Unmarshal(message["id"], &id); err != nil {
+			t.Fatal(err)
+		}
+		responses[id] = message
+	}
+	if messageType(t, responses[51]) != "error" || !strings.Contains(string(responses[51]["error"]), "cancelled") {
+		t.Fatalf("update response = %#v", responses[51])
+	}
+	if messageType(t, responses[52]) != "result" || !strings.Contains(string(responses[52]["result"]), `"cancelled":true`) {
+		t.Fatalf("cancel response = %#v", responses[52])
+	}
+}
+
+func TestServerReportsSuccessfulUpdateWhenCancellationArrivesAfterCommit(t *testing.T) {
+	updateRequest, err := json.Marshal(map[string]any{
+		"method": "update",
+		"id":     61,
+		"params": map[string]any{
+			"filePath": "/tmp/package.json", "registryType": "npm", "options": map[string]any{}, "outdated": []any{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancelRequest, err := json.Marshal(map[string]any{
+		"method": "cancel",
+		"id":     62,
+		"params": map[string]any{"id": 61},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	inputReader, inputWriter := io.Pipe()
+	var output bytes.Buffer
+	server := NewServerWithIO(inputReader, &output)
+	updateStarted := make(chan struct{})
+	server.updateDependencies = func(ctx context.Context, filePath string, outdated []shared.OutdatedDependency, registryType shared.RegistryType, options shared.Options, workingDirectory string, log shared.LogFunc) error {
+		close(updateStarted)
+		<-ctx.Done()
+		return nil
+	}
+	serverError := make(chan error, 1)
+	go func() {
+		serverError <- server.Run()
+	}()
+	if _, err := inputWriter.Write(append(updateRequest, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	<-updateStarted
+	if _, err := inputWriter.Write(append(cancelRequest, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	if err := inputWriter.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-serverError; err != nil {
+		t.Fatal(err)
+	}
+
+	decoder := json.NewDecoder(&output)
+	responses := make(map[int]map[string]json.RawMessage)
+	for decoder.More() {
+		var message map[string]json.RawMessage
+		if err := decoder.Decode(&message); err != nil {
+			t.Fatal(err)
+		}
+		var id int
+		if err := json.Unmarshal(message["id"], &id); err != nil {
+			t.Fatal(err)
+		}
+		responses[id] = message
+	}
+	if messageType(t, responses[61]) != "result" {
+		t.Fatalf("update response = %#v", responses[61])
+	}
+	if messageType(t, responses[62]) != "result" || !strings.Contains(string(responses[62]["result"]), `"cancelled":true`) {
+		t.Fatalf("cancel response = %#v", responses[62])
+	}
+}
+
 func TestServerAssociatesLogsAndProgressWithRequest(t *testing.T) {
 	filePath := filepath.Join(t.TempDir(), "package.json")
 	messages := runProtocol(t, map[string]any{
@@ -249,12 +399,12 @@ func TestServerAssociatesLogsAndProgressWithRequest(t *testing.T) {
 			"options": map[string]any{"verbose": true, "noCache": true},
 		},
 	}, func(server *Server) {
-		server.parseDependencies = func(_ string, _ shared.RegistryType, _ shared.Options, log shared.LogFunc) ([]shared.Dependency, error) {
+		server.parseDependencies = func(filePath string, registryType shared.RegistryType, options shared.Options, log shared.LogFunc) ([]shared.Dependency, error) {
 			log("parser")
 			return []shared.Dependency{{BaseDependency: shared.BaseDependency{Name: "example"}, Version: "1.0.0"}}, nil
 		}
-		server.checkOutdated = func(_ context.Context, dependencies []shared.Dependency, _ shared.RegistryType, _ shared.Options, _ string, progress func(int, int), _ shared.LogFunc) (*shared.CheckResult, error) {
-			progress(1, len(dependencies))
+		server.checkOutdated = func(ctx context.Context, dependencies []shared.Dependency, registryType shared.RegistryType, options shared.Options, workingDirectory string, progress shared.ProgressFunc, log shared.LogFunc) (*shared.CheckResult, error) {
+			progress(shared.Progress{FileCurrent: 1, FileTotal: len(dependencies), Current: 1, Total: len(dependencies)})
 			return &shared.CheckResult{}, nil
 		}
 	})
@@ -279,8 +429,8 @@ func TestServerResponsePreservesZeroRequestID(t *testing.T) {
 		"id":     0,
 		"params": map[string]any{"directory": t.TempDir()},
 	}, func(server *Server) {
-		server.detectDependency = func(directory string, _ shared.LogFunc) (string, shared.RegistryType, error) {
-			return filepath.Join(directory, "package.json"), shared.Npm, nil
+		server.detectDependency = func(directory string, log shared.LogFunc) (string, shared.RegistryType, error) {
+			return filepath.Join(directory, "package.json"), shared.NPM, nil
 		}
 	})
 	foundResult := false
@@ -322,10 +472,10 @@ func TestServerBoundsConcurrentRequestsWithoutBlockingCancellation(t *testing.T)
 
 	var output bytes.Buffer
 	server := NewServerWithIO(strings.NewReader(input.String()), &output)
-	server.parseDependencies = func(string, shared.RegistryType, shared.Options, shared.LogFunc) ([]shared.Dependency, error) {
+	server.parseDependencies = func(filePath string, registryType shared.RegistryType, options shared.Options, log shared.LogFunc) ([]shared.Dependency, error) {
 		return []shared.Dependency{{BaseDependency: shared.BaseDependency{Name: "example"}, Version: "1.0.0"}}, nil
 	}
-	server.checkOutdated = func(ctx context.Context, _ []shared.Dependency, _ shared.RegistryType, _ shared.Options, _ string, _ func(int, int), _ shared.LogFunc) (*shared.CheckResult, error) {
+	server.checkOutdated = func(ctx context.Context, dependencies []shared.Dependency, registryType shared.RegistryType, options shared.Options, workingDirectory string, progress shared.ProgressFunc, log shared.LogFunc) (*shared.CheckResult, error) {
 		<-ctx.Done()
 		return nil, ctx.Err()
 	}

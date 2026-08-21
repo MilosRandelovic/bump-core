@@ -19,8 +19,9 @@ import (
 type RegistryClient struct {
 	Log             shared.LogFunc
 	ConfigDirectory string
+	currentTime     func() time.Time
 	configOnce      sync.Once
-	config          *NpmConfig
+	config          *npmConfig
 	configErr       error
 }
 
@@ -34,30 +35,31 @@ func (client *RegistryClient) log(ctx context.Context, format string, args ...an
 	}
 }
 
-// NpmPackageInfo represents the response from npm registry
-type NpmPackageInfo struct {
+type npmPackageInfo struct {
 	DistTags map[string]string `json:"dist-tags"`
+	Time     map[string]string `json:"time"`
 	Versions map[string]struct {
 		Version    string `json:"version"`
 		Deprecated any    `json:"deprecated,omitempty"`
 	} `json:"versions"`
 }
 
-// NewRegistryClient creates a new npm registry client
+// NewRegistryClient returns an npm registry client that lazily loads .npmrc configuration.
+// Set ConfigDirectory before the first request to resolve project configuration, and set Log for diagnostics.
 func NewRegistryClient() *RegistryClient {
 	return &RegistryClient{}
 }
 
-// GetLatestVersionFromRegistry fetches the latest version from a specific registry
-func (client *RegistryClient) GetLatestVersionFromRegistry(ctx context.Context, packageName, registryURL string, _ shared.Options, cache *shared.Cache) (string, error) {
+// GetLatestVersionFromRegistry returns the package's latest eligible npm dist-tag version.
+// It resolves scoped registries and authentication from .npmrc, honors minimum-age filtering, and uses cache when non-nil.
+func (client *RegistryClient) GetLatestVersionFromRegistry(ctx context.Context, packageName, registryURL string, options shared.Options, cache *shared.Cache) (string, error) {
 	targetRegistryURL, npmrcConfig, err := client.resolveRegistryURL(packageName, registryURL)
 	if err != nil {
 		return "", err
 	}
 
-	// Check cache first if enabled
 	if cache != nil {
-		key := shared.GenerateCacheKey(packageName, "npm", targetRegistryURL, "", "*")
+		key := shared.GenerateCacheKey(packageName, "npm", targetRegistryURL, "", "*", options)
 		if entry, ok := cache.Get(key); ok {
 			client.log(ctx, "Cache hit: %s\n", packageName)
 			return entry.AbsoluteLatest, nil
@@ -69,23 +71,43 @@ func (client *RegistryClient) GetLatestVersionFromRegistry(ctx context.Context, 
 		return "", err
 	}
 
-	var packageInfo NpmPackageInfo
+	var packageInfo npmPackageInfo
 	if err := json.Unmarshal(body, &packageInfo); err != nil {
 		return "", fmt.Errorf("failed to parse npm response: %w", err)
 	}
 
-	if latest, ok := packageInfo.DistTags["latest"]; ok {
-		// Cache the result if cache is enabled
+	latest, ok := packageInfo.DistTags["latest"]
+	var nextEligibility time.Time
+	if options.EnforceMinimumReleaseAge {
+		if !ok || strings.TrimSpace(latest) == "" {
+			return "", fmt.Errorf("no latest version found for %s", packageName)
+		}
+		eligibleVersions, eligibility, filterErr := client.filterVersionsByMinimumReleaseAge(ctx, packageName, packageInfo)
+		if filterErr != nil {
+			return "", filterErr
+		}
+		_, latest, filterErr = shared.FindBothLatestVersions(eligibleVersions, "<="+latest)
+		if filterErr != nil {
+			return "", filterErr
+		}
+		nextEligibility = eligibility
+		ok = true
+	}
+
+	if ok {
+
 		if cache != nil {
+			now := client.now()
 			entry := shared.CacheEntry{
 				PackageName:      packageName,
 				Type:             "npm",
 				Registry:         targetRegistryURL,
 				CurrentVersion:   "",
 				Constraint:       "*",
+				MinimumAge:       options.EnforceMinimumReleaseAge,
 				AbsoluteLatest:   latest,
 				ConstraintLatest: latest,
-				Expiry:           time.Now().Add(10 * time.Minute),
+				Expiry:           shared.CacheExpiry(now, nextEligibility),
 			}
 			cache.Set(entry)
 		}
@@ -95,16 +117,16 @@ func (client *RegistryClient) GetLatestVersionFromRegistry(ctx context.Context, 
 	return "", fmt.Errorf("no latest version found for %s", packageName)
 }
 
-// GetBothLatestVersions fetches both the absolute latest version and the latest version satisfying a constraint
-func (client *RegistryClient) GetBothLatestVersions(ctx context.Context, packageName, constraint, registryURL string, _ shared.Options, cache *shared.Cache) (string, string, error) {
+// GetBothLatestVersions returns the latest eligible non-deprecated npm version and the latest one satisfying constraint.
+// It preserves the absolute result when returning ErrNoVersionsSatisfyConstraint and uses cache when non-nil.
+func (client *RegistryClient) GetBothLatestVersions(ctx context.Context, packageName, constraint, registryURL string, options shared.Options, cache *shared.Cache) (absoluteLatest string, constraintLatest string, err error) {
 	targetRegistryURL, npmrcConfig, err := client.resolveRegistryURL(packageName, registryURL)
 	if err != nil {
 		return "", "", err
 	}
 
-	// Check cache first if enabled
 	if cache != nil {
-		key := shared.GenerateCacheKey(packageName, "npm", targetRegistryURL, "", constraint)
+		key := shared.GenerateCacheKey(packageName, "npm", targetRegistryURL, "", constraint, options)
 		if entry, ok := cache.Get(key); ok {
 			client.log(ctx, "Cache hit: %s\n", packageName)
 			return entry.AbsoluteLatest, entry.ConstraintLatest, nil
@@ -116,36 +138,43 @@ func (client *RegistryClient) GetBothLatestVersions(ctx context.Context, package
 		return "", "", err
 	}
 
-	var packageInfo NpmPackageInfo
+	var packageInfo npmPackageInfo
 	if err := json.Unmarshal(body, &packageInfo); err != nil {
 		return "", "", fmt.Errorf("failed to parse npm response: %w", err)
 	}
 
-	// Get all non-deprecated versions
 	versions := make([]string, 0, len(packageInfo.Versions))
 	for version, versionInfo := range packageInfo.Versions {
-		// Include only non-deprecated versions (deprecated field is null/missing for non-deprecated)
+
 		if versionInfo.Deprecated == nil || versionInfo.Deprecated == "" {
 			versions = append(versions, version)
 		}
 	}
+	var nextEligibility time.Time
+	if options.EnforceMinimumReleaseAge {
+		versions, nextEligibility, err = client.filterVersionsByMinimumReleaseAge(ctx, packageName, packageInfo)
+		if err != nil {
+			return "", "", err
+		}
+	}
 
-	absoluteLatest, constraintLatest, err := shared.FindBothLatestVersions(versions, constraint)
+	absoluteLatest, constraintLatest, err = shared.FindBothLatestVersions(versions, constraint)
 	if err != nil {
 		return absoluteLatest, constraintLatest, err
 	}
 
-	// Cache the result if cache is enabled
 	if cache != nil {
+		now := client.now()
 		entry := shared.CacheEntry{
 			PackageName:      packageName,
 			Type:             "npm",
 			Registry:         targetRegistryURL,
 			CurrentVersion:   "",
 			Constraint:       constraint,
+			MinimumAge:       options.EnforceMinimumReleaseAge,
 			AbsoluteLatest:   absoluteLatest,
 			ConstraintLatest: constraintLatest,
-			Expiry:           time.Now().Add(10 * time.Minute),
+			Expiry:           shared.CacheExpiry(now, nextEligibility),
 		}
 		cache.Set(entry)
 	}
@@ -153,7 +182,42 @@ func (client *RegistryClient) GetBothLatestVersions(ctx context.Context, package
 	return absoluteLatest, constraintLatest, nil
 }
 
-func (client *RegistryClient) resolveRegistryURL(packageName, registryURL string) (string, *NpmConfig, error) {
+func (client *RegistryClient) filterVersionsByMinimumReleaseAge(ctx context.Context, packageName string, packageInfo npmPackageInfo) ([]string, time.Time, error) {
+	publishedVersions := make([]shared.PublishedVersion, 0, len(packageInfo.Versions))
+	for version, versionInfo := range packageInfo.Versions {
+		if versionInfo.Deprecated != nil && versionInfo.Deprecated != "" {
+			continue
+		}
+		publishedVersions = append(publishedVersions, shared.PublishedVersion{
+			Version:     version,
+			PublishedAt: packageInfo.Time[version],
+		})
+	}
+
+	filtered := shared.FilterVersionsByMinimumReleaseAge(publishedVersions, client.now())
+	for _, version := range filtered.TooYoung {
+		client.log(ctx, "Ignoring %s %s because it is not more than 24 hours old\n", packageName, version)
+	}
+	if len(filtered.Unverified) > 0 {
+		client.log(ctx, "Ignoring %d version(s) of %s with unverifiable publication times\n", len(filtered.Unverified), packageName)
+	}
+	if len(filtered.Versions) == 0 {
+		if len(filtered.Unverified) > 0 {
+			return nil, time.Time{}, fmt.Errorf("could not verify publication times for %s", packageName)
+		}
+		return nil, filtered.NextEligibility, shared.ErrNoVersionsMeetMinimumReleaseAge
+	}
+	return filtered.Versions, filtered.NextEligibility, nil
+}
+
+func (client *RegistryClient) now() time.Time {
+	if client.currentTime != nil {
+		return client.currentTime()
+	}
+	return time.Now()
+}
+
+func (client *RegistryClient) resolveRegistryURL(packageName, registryURL string) (string, *npmConfig, error) {
 	configDirectory := client.ConfigDirectory
 	if configDirectory == "" {
 		currentWorkingDir, err := os.Getwd()
@@ -182,8 +246,7 @@ func (client *RegistryClient) resolveRegistryURL(packageName, registryURL string
 	return getRegistryForPackage(packageName, npmrcConfig), npmrcConfig, nil
 }
 
-// fetchPackageInfo is a shared method to fetch package information from registries
-func (client *RegistryClient) fetchPackageInfo(ctx context.Context, packageName, targetRegistryURL string, npmrcConfig *NpmConfig) ([]byte, error) {
+func (client *RegistryClient) fetchPackageInfo(ctx context.Context, packageName, targetRegistryURL string, npmrcConfig *npmConfig) ([]byte, error) {
 	url := fmt.Sprintf("%s/%s", strings.TrimRight(targetRegistryURL, "/"), packageName)
 
 	client.log(ctx, "Checking npm package: %s (registry: %s)\n", packageName, targetRegistryURL)
@@ -194,7 +257,6 @@ func (client *RegistryClient) fetchPackageInfo(ctx context.Context, packageName,
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Add authentication if available for this registry
 	if authToken := getAuthTokenForRegistry(targetRegistryURL, npmrcConfig); authToken != "" {
 		request.Header.Set("Authorization", "Bearer "+authToken)
 		client.log(ctx, "Using authentication for registry: %s\n", targetRegistryURL)
@@ -218,10 +280,4 @@ func (client *RegistryClient) fetchPackageInfo(ctx context.Context, packageName,
 	return body, nil
 }
 
-// GetRegistryType returns the registry type this client handles
-func (client *RegistryClient) GetRegistryType() shared.RegistryType {
-	return shared.Npm
-}
-
-// Ensure RegistryClient implements the interface
 var _ shared.RegistryClient = (*RegistryClient)(nil)

@@ -19,9 +19,10 @@ type PreparedFileUpdate struct {
 	mode     fs.FileMode
 }
 
-// PrepareDependenciesInFile validates and renders all dependency edits without modifying the file.
+// PrepareDependenciesInFile validates and renders every requested edit without modifying the file.
+// It resolves symlink targets, preserves file mode, rejects hard links and stale source locations, and returns nil for no edits.
 func PrepareDependenciesInFile(filePath string, outdated []OutdatedDependency, patternProvider PatternProvider) (*PreparedFileUpdate, error) {
-	// If no dependencies to update, return early
+
 	if len(outdated) == 0 {
 		return nil, nil
 	}
@@ -49,21 +50,21 @@ func PrepareDependenciesInFile(filePath string, outdated []OutdatedDependency, p
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
 
-	// Split content into lines
 	lines := strings.Split(string(data), "\n")
 
-	// Update each dependency by modifying its specific line
 	for _, dependency := range outdated {
 		if dependency.LineNumber < 1 || dependency.LineNumber > len(lines) {
 			return nil, fmt.Errorf("invalid line number %d for dependency %s", dependency.LineNumber, dependency.Name)
 		}
 
-		lineIndex := dependency.LineNumber - 1 // Convert to 0-based index
+		lineIndex := dependency.LineNumber - 1
 		line := lines[lineIndex]
 
-		// Get the pattern from the provider
 		pattern := patternProvider.GetPattern(dependency)
-		versionRegex := regexp.MustCompile(pattern)
+		versionRegex, err := regexp.Compile(pattern)
+		if err != nil {
+			return nil, fmt.Errorf("invalid update pattern for dependency %s: %w", dependency.Name, err)
+		}
 		allMatches := versionRegex.FindAllStringSubmatchIndex(line, -1)
 		if len(allMatches) == 0 {
 			return nil, fmt.Errorf("could not find %s on line %d for updating", dependency.Name, dependency.LineNumber)
@@ -103,7 +104,6 @@ func PrepareDependenciesInFile(filePath string, outdated []OutdatedDependency, p
 			return nil, fmt.Errorf("latest version %s does not satisfy updated constraint %q for dependency %s", dependency.LatestVersion, newVersion, dependency.Name)
 		}
 
-		// Get the replacement string from the provider
 		replacement := patternProvider.GetReplacement(dependency, newVersion)
 		expandedReplacement := versionRegex.ExpandString(nil, replacement, line, selectedMatch)
 		newLine := line[:selectedMatch[0]] + string(expandedReplacement) + line[selectedMatch[1]:]
@@ -148,7 +148,8 @@ func fileLinkCount(info fs.FileInfo) uint64 {
 	return 1
 }
 
-// Apply atomically writes a previously validated dependency file edit.
+// Apply atomically replaces the prepared target while preserving its file mode.
+// Validation is not repeated, so callers must hold any transaction lock from preparation through Apply.
 func (update *PreparedFileUpdate) Apply() error {
 	temporaryFile, err := os.CreateTemp(filepath.Dir(update.filePath), "."+filepath.Base(update.filePath)+".bump-*")
 	if err != nil {

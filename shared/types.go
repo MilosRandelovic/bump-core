@@ -9,13 +9,14 @@ import (
 // DependencyType represents the type of dependency
 type DependencyType int
 
+// Supported dependency sections.
 const (
 	Dependencies DependencyType = iota
 	DevDependencies
 	PeerDependencies
 )
 
-// String returns the string representation of DependencyType
+// String returns the dependency-file section name, or a numeric fallback for an unknown value.
 func (dependencyType DependencyType) String() string {
 	switch dependencyType {
 	case Dependencies:
@@ -25,39 +26,41 @@ func (dependencyType DependencyType) String() string {
 	case PeerDependencies:
 		return "peerDependencies"
 	default:
-		panic(fmt.Sprintf("unknown DependencyType: %d", dependencyType))
+		return fmt.Sprintf("DependencyType(%d)", dependencyType)
 	}
 }
 
 // RegistryType represents the type of package registry
 type RegistryType int
 
+// Supported package registries.
 const (
-	Npm RegistryType = iota
+	NPM RegistryType = iota
 	Pub
 )
 
-// String returns the string representation of RegistryType
+// String returns the registry's wire value, or a numeric fallback for an unknown value.
 func (registryType RegistryType) String() string {
 	switch registryType {
-	case Npm:
+	case NPM:
 		return "npm"
 	case Pub:
 		return "pub"
 	default:
-		panic(fmt.Sprintf("unknown RegistryType: %d", registryType))
+		return fmt.Sprintf("RegistryType(%d)", registryType)
 	}
 }
 
 // SkipReason represents the reason a dependency was skipped
 type SkipReason int
 
+// Reasons a dependency update can be skipped.
 const (
 	HardcodedVersion SkipReason = iota
 	IncompatibleWithConstraint
 )
 
-// String returns the string representation of SkipReason
+// String returns user-facing text for the skip reason, or a numeric fallback for an unknown value.
 func (skipReason SkipReason) String() string {
 	switch skipReason {
 	case HardcodedVersion:
@@ -65,7 +68,7 @@ func (skipReason SkipReason) String() string {
 	case IncompatibleWithConstraint:
 		return "incompatible with constraint"
 	default:
-		panic(fmt.Sprintf("unknown SkipReason: %d", skipReason))
+		return fmt.Sprintf("SkipReason(%d)", skipReason)
 	}
 }
 
@@ -114,6 +117,7 @@ type DependencyError struct {
 // SemverChange represents the type of version change
 type SemverChange int
 
+// Semantic-version change levels.
 const (
 	PatchChange SemverChange = iota
 	MinorChange
@@ -122,48 +126,68 @@ const (
 
 // Options contains all configuration flags for the application
 type Options struct {
-	Verbose                 bool
-	Update                  bool
-	Semver                  bool
-	NoCache                 bool
-	IncludePeerDependencies bool
-	Monorepo                bool
+	Verbose                  bool
+	Update                   bool
+	Semver                   bool
+	NoCache                  bool
+	IncludePeerDependencies  bool
+	Monorepo                 bool
+	EnforceMinimumReleaseAge bool
 }
 
-// LogFunc is a callback for verbose logging
+// Progress reports both per-file and overall dependency-check completion.
+type Progress struct {
+	FilePath    string
+	FileCurrent int
+	FileTotal   int
+	Current     int
+	Total       int
+}
+
+// ProgressFunc receives dependency-check progress updates.
+type ProgressFunc func(progress Progress)
+
+// LogFunc receives optional diagnostic output.
 type LogFunc func(format string, args ...any)
 
-// Custom error types for better error handling
 var (
-	// ErrNoVersionsSatisfyConstraint indicates that no versions match the given semver constraint
+	// ErrNoVersionsSatisfyConstraint indicates that no versions match the given semver constraint.
 	ErrNoVersionsSatisfyConstraint = errors.New("no versions satisfy the constraint")
 
-	// ErrUnsupportedRegistryType indicates an unknown registry type string
+	// ErrUnsupportedRegistryType indicates an unknown registry type.
 	ErrUnsupportedRegistryType = errors.New("unsupported registry type")
+
+	// ErrNoVersionsMeetMinimumReleaseAge indicates that every verifiable release is too young.
+	ErrNoVersionsMeetMinimumReleaseAge = errors.New("no versions meet the minimum release age")
 )
 
-// Parser interface defines the contract for parsing dependencies from files
+// Parser reads one ecosystem-specific dependency file.
 type Parser interface {
+	// ParseDependencies returns the supported dependencies found in filePath according to options.
 	ParseDependencies(filePath string, options Options) ([]Dependency, error)
-	GetRegistryType() RegistryType
 }
 
-// PatternProvider defines how to generate regex patterns for different file formats
+// PatternProvider describes how dependency constraints are located and replaced in a file.
 type PatternProvider interface {
+	// GetPattern returns a regular expression whose second capture group is the current constraint.
 	GetPattern(dependency OutdatedDependency) string
+	// GetReplacement returns a regexp expansion template that substitutes newVersion while preserving surrounding content.
 	GetReplacement(dependency OutdatedDependency, newVersion string) string
 }
 
-// Updater interface defines the contract for updating dependencies in files
+// Updater supplies ecosystem-specific update rules.
 type Updater interface {
+	// GetPatternProvider returns the file-format rules used to locate and replace dependency constraints.
 	GetPatternProvider() PatternProvider
-	GetRegistryType() RegistryType
+	// ValidateOptions rejects options unsupported by the ecosystem.
 	ValidateOptions(options Options) error
 }
 
-// RegistryClient interface defines the contract for fetching package information
+// RegistryClient resolves package versions from an ecosystem registry.
 type RegistryClient interface {
+	// GetLatestVersionFromRegistry returns the latest eligible version, using cache when non-nil and honoring context cancellation.
 	GetLatestVersionFromRegistry(ctx context.Context, packageName, registryURL string, options Options, cache *Cache) (string, error)
+	// GetBothLatestVersions returns the latest eligible version and the latest version satisfying constraint.
+	// When no version satisfies the constraint, it returns the absolute latest version with ErrNoVersionsSatisfyConstraint.
 	GetBothLatestVersions(ctx context.Context, packageName, constraint, registryURL string, options Options, cache *Cache) (absoluteLatest, constraintLatest string, err error)
-	GetRegistryType() RegistryType
 }

@@ -14,12 +14,16 @@ import (
 
 const cacheFormatVersion = 1
 
+const cacheLifetime = 10 * time.Minute
+
+// CacheEntry is one persisted registry lookup result.
 type CacheEntry struct {
 	PackageName      string    `json:"packageName"`
 	Type             string    `json:"type"`
 	Registry         string    `json:"registry"`
 	CurrentVersion   string    `json:"currentVersion"`
 	Constraint       string    `json:"constraint"`
+	MinimumAge       bool      `json:"minimumAge,omitempty"`
 	AbsoluteLatest   string    `json:"absoluteLatest"`
 	ConstraintLatest string    `json:"constraintLatest"`
 	Expiry           time.Time `json:"expiry"`
@@ -38,6 +42,7 @@ func (e *unsupportedCacheVersionError) Error() string {
 	return fmt.Sprintf("unsupported cache format version: %d", e.version)
 }
 
+// Cache stores registry lookup results and persists them between runs.
 type Cache struct {
 	entries  map[string]CacheEntry
 	filePath string
@@ -68,12 +73,38 @@ func NewCacheWithError() (*Cache, error) {
 	return cache, nil
 }
 
-// GenerateCacheKey returns the stable key for one cached registry lookup.
-func GenerateCacheKey(packageName, packageType, registry, current, constraint string) string {
-	key, _ := json.Marshal([5]string{packageName, packageType, registry, current, constraint})
+// GenerateCacheKey returns the stable identity for one registry lookup.
+// Only options that change the result, currently minimum-age filtering, affect the key.
+func GenerateCacheKey(packageName, packageType, registry, current, constraint string, options Options) string {
+	return cacheKeyForEntry(CacheEntry{
+		PackageName:    packageName,
+		Type:           packageType,
+		Registry:       registry,
+		CurrentVersion: current,
+		Constraint:     constraint,
+		MinimumAge:     options.EnforceMinimumReleaseAge,
+	})
+}
+
+func cacheKeyForEntry(entry CacheEntry) string {
+	if !entry.MinimumAge {
+		key, _ := json.Marshal([5]string{entry.PackageName, entry.Type, entry.Registry, entry.CurrentVersion, entry.Constraint})
+		return string(key)
+	}
+	key, _ := json.Marshal([6]string{entry.PackageName, entry.Type, entry.Registry, entry.CurrentVersion, entry.Constraint, "minimumAge"})
 	return string(key)
 }
 
+// CacheExpiry returns the ten-minute cache expiry, shortened when nextEligibility occurs sooner.
+func CacheExpiry(now, nextEligibility time.Time) time.Time {
+	expiry := now.Add(cacheLifetime)
+	if !nextEligibility.IsZero() && nextEligibility.Before(expiry) {
+		return nextEligibility
+	}
+	return expiry
+}
+
+// LoadEntries replaces the in-memory entries with the persisted cache contents.
 func (c *Cache) LoadEntries() error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -83,11 +114,11 @@ func (c *Cache) LoadEntries() error {
 		if os.IsNotExist(err) {
 			return nil
 		}
-		return err
+		return fmt.Errorf("failed to read cache: %w", err)
 	}
 	entries, err := decodeCacheEntries(data)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to load cache entries: %w", err)
 	}
 	c.entries = entries
 
@@ -110,21 +141,20 @@ func decodeCacheEntries(data []byte) (map[string]CacheEntry, error) {
 
 	entries := make(map[string]CacheEntry, len(persisted.Entries))
 	for _, entry := range persisted.Entries {
-		key := GenerateCacheKey(entry.PackageName, entry.Type, entry.Registry, entry.CurrentVersion, entry.Constraint)
+		key := cacheKeyForEntry(entry)
 		entries[key] = entry
 	}
 	return entries, nil
 }
 
+// SaveEntries merges the in-memory entries with the persisted cache and writes them atomically.
 func (c *Cache) SaveEntries() error {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 	cachePersistenceMutex.Lock()
 	defer cachePersistenceMutex.Unlock()
 
-	// Another check may have saved entries since this Cache was loaded. Merge
-	// the latest on-disk state while persistence is serialized so neither set is
-	// lost. Later-expiring entries win when both checks updated the same key.
+	// Reloading under the persistence lock prevents concurrent cache instances from overwriting one another's entries.
 	mergedEntries := make(map[string]CacheEntry, len(c.entries))
 	if data, err := os.ReadFile(c.filePath); err == nil {
 		diskEntries, decodeErr := decodeCacheEntries(data)
@@ -204,6 +234,7 @@ func (c *Cache) SaveEntries() error {
 	return nil
 }
 
+// Get returns an unexpired cache entry.
 func (c *Cache) Get(key string) (CacheEntry, bool) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
@@ -218,20 +249,15 @@ func (c *Cache) Get(key string) (CacheEntry, bool) {
 	return entry, true
 }
 
+// Set adds or replaces an in-memory cache entry.
 func (c *Cache) Set(entry CacheEntry) {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	key := GenerateCacheKey(entry.PackageName, entry.Type, entry.Registry, entry.CurrentVersion, entry.Constraint)
+	key := cacheKeyForEntry(entry)
 	c.entries[key] = entry
 }
 
-func (c *Cache) Clear() {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	c.entries = make(map[string]CacheEntry)
-}
-
-// CleanExpiredEntries removes all expired entries from the cache
+// CleanExpiredEntries removes expired entries from memory without persisting the change.
 func (c *Cache) CleanExpiredEntries() {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()

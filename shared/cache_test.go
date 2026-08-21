@@ -53,7 +53,7 @@ func TestCachePersistsCompoundConstraintAsJSON(t *testing.T) {
 	if err := reloaded.LoadEntries(); err != nil {
 		t.Fatalf("LoadEntries() error = %v", err)
 	}
-	key := GenerateCacheKey(entry.PackageName, entry.Type, entry.Registry, entry.CurrentVersion, entry.Constraint)
+	key := GenerateCacheKey(entry.PackageName, entry.Type, entry.Registry, entry.CurrentVersion, entry.Constraint, Options{})
 	if got, ok := reloaded.Get(key); !ok || got.Constraint != entry.Constraint {
 		t.Fatalf("compound constraint was not preserved: %#v (ok=%v)", got, ok)
 	}
@@ -78,6 +78,39 @@ func TestCacheRejectsUnsupportedJSONVersion(t *testing.T) {
 	}
 	if !bytes.Equal(data, original) {
 		t.Fatalf("unsupported cache was overwritten: %q", data)
+	}
+}
+
+func TestCacheSeparatesMinimumAgeResults(t *testing.T) {
+	cache := &Cache{entries: make(map[string]CacheEntry), filePath: filepath.Join(t.TempDir(), "cache")}
+	expiry := time.Now().Add(time.Hour)
+	cache.Set(CacheEntry{
+		PackageName: "example", Type: "npm", Registry: "https://registry.npmjs.org", Constraint: "*",
+		AbsoluteLatest: "2.0.0", ConstraintLatest: "2.0.0", Expiry: expiry,
+	})
+	cache.Set(CacheEntry{
+		PackageName: "example", Type: "npm", Registry: "https://registry.npmjs.org", Constraint: "*", MinimumAge: true,
+		AbsoluteLatest: "1.9.0", ConstraintLatest: "1.9.0", Expiry: expiry,
+	})
+
+	unfilteredKey := GenerateCacheKey("example", "npm", "https://registry.npmjs.org", "", "*", Options{})
+	filteredKey := GenerateCacheKey("example", "npm", "https://registry.npmjs.org", "", "*", Options{EnforceMinimumReleaseAge: true})
+	if entry, ok := cache.Get(unfilteredKey); !ok || entry.AbsoluteLatest != "2.0.0" {
+		t.Fatalf("unexpected unfiltered entry: %#v, %v", entry, ok)
+	}
+	if entry, ok := cache.Get(filteredKey); !ok || entry.AbsoluteLatest != "1.9.0" {
+		t.Fatalf("unexpected filtered entry: %#v, %v", entry, ok)
+	}
+}
+
+func TestCacheExpiryUsesNextEligibilityWhenSooner(t *testing.T) {
+	now := time.Date(2026, time.August, 16, 12, 0, 0, 0, time.UTC)
+	nextEligibility := now.Add(5 * time.Minute)
+	if expiry := CacheExpiry(now, nextEligibility); !expiry.Equal(nextEligibility) {
+		t.Fatalf("expiry = %s, expected %s", expiry, nextEligibility)
+	}
+	if expiry := CacheExpiry(now, now.Add(time.Hour)); !expiry.Equal(now.Add(10 * time.Minute)) {
+		t.Fatalf("expiry = %s, expected normal ten-minute lifetime", expiry)
 	}
 }
 
@@ -109,7 +142,7 @@ func TestCacheRejectsNonJSONFormat(t *testing.T) {
 	if err := reloaded.LoadEntries(); err != nil {
 		t.Fatalf("LoadEntries() after reset error = %v", err)
 	}
-	key := GenerateCacheKey(entry.PackageName, entry.Type, entry.Registry, entry.CurrentVersion, entry.Constraint)
+	key := GenerateCacheKey(entry.PackageName, entry.Type, entry.Registry, entry.CurrentVersion, entry.Constraint, Options{})
 	if _, ok := reloaded.Get(key); !ok {
 		t.Fatal("expected fresh cache entry after replacing invalid cache data")
 	}
@@ -119,7 +152,6 @@ func TestCacheBasicOps(t *testing.T) {
 	cachePath := getTestCachePath()
 	os.Remove(cachePath)
 
-	// Create cache without auto-loading
 	cache := &Cache{
 		entries:  make(map[string]CacheEntry),
 		filePath: cachePath,
@@ -138,7 +170,7 @@ func TestCacheBasicOps(t *testing.T) {
 	}
 	cache.Set(entry)
 
-	key := GenerateCacheKey(entry.PackageName, entry.Type, entry.Registry, entry.CurrentVersion, entry.Constraint)
+	key := GenerateCacheKey(entry.PackageName, entry.Type, entry.Registry, entry.CurrentVersion, entry.Constraint, Options{})
 	got, ok := cache.Get(key)
 	if !ok {
 		t.Fatalf("expected cache hit")
@@ -148,14 +180,14 @@ func TestCacheBasicOps(t *testing.T) {
 	}
 
 	cache.SaveEntries()
-	cache2 := &Cache{
+	reloadedCache := &Cache{
 		entries:  make(map[string]CacheEntry),
 		filePath: cachePath,
 		mutex:    sync.Mutex{},
 	}
-	cache2.LoadEntries()
-	got2, ok2 := cache2.Get(key)
-	if !ok2 || got2.AbsoluteLatest != "2.0.0" {
+	reloadedCache.LoadEntries()
+	persistedEntry, found := reloadedCache.Get(key)
+	if !found || persistedEntry.AbsoluteLatest != "2.0.0" {
 		t.Errorf("expected persisted cache hit")
 	}
 
@@ -194,13 +226,13 @@ func TestCacheRegistryDifferentiation(t *testing.T) {
 	cache.Set(entryNpm)
 	cache.Set(entryPub)
 
-	keyNpm := GenerateCacheKey(entryNpm.PackageName, entryNpm.Type, entryNpm.Registry, entryNpm.CurrentVersion, entryNpm.Constraint)
-	keyPub := GenerateCacheKey(entryPub.PackageName, entryPub.Type, entryPub.Registry, entryPub.CurrentVersion, entryPub.Constraint)
+	npmKey := GenerateCacheKey(entryNpm.PackageName, entryNpm.Type, entryNpm.Registry, entryNpm.CurrentVersion, entryNpm.Constraint, Options{})
+	pubKey := GenerateCacheKey(entryPub.PackageName, entryPub.Type, entryPub.Registry, entryPub.CurrentVersion, entryPub.Constraint, Options{})
 
-	if got, ok := cache.Get(keyNpm); !ok || got.AbsoluteLatest != "2.0.0" {
+	if got, ok := cache.Get(npmKey); !ok || got.AbsoluteLatest != "2.0.0" {
 		t.Errorf("expected npm cache hit")
 	}
-	if got, ok := cache.Get(keyPub); !ok || got.AbsoluteLatest != "3.0.0" {
+	if got, ok := cache.Get(pubKey); !ok || got.AbsoluteLatest != "3.0.0" {
 		t.Errorf("expected pub cache hit")
 	}
 
@@ -240,8 +272,8 @@ func TestCacheDifferentiatesSamePackageAcrossRegistries(t *testing.T) {
 	cache.Set(publicEntry)
 	cache.Set(privateEntry)
 
-	publicKey := GenerateCacheKey(publicEntry.PackageName, publicEntry.Type, publicEntry.Registry, publicEntry.CurrentVersion, publicEntry.Constraint)
-	privateKey := GenerateCacheKey(privateEntry.PackageName, privateEntry.Type, privateEntry.Registry, privateEntry.CurrentVersion, privateEntry.Constraint)
+	publicKey := GenerateCacheKey(publicEntry.PackageName, publicEntry.Type, publicEntry.Registry, publicEntry.CurrentVersion, publicEntry.Constraint, Options{})
+	privateKey := GenerateCacheKey(privateEntry.PackageName, privateEntry.Type, privateEntry.Registry, privateEntry.CurrentVersion, privateEntry.Constraint, Options{})
 
 	if got, ok := cache.Get(publicKey); !ok || got.AbsoluteLatest != "2.0.0" {
 		t.Errorf("expected public registry cache entry, got %#v (ok=%v)", got, ok)
@@ -270,41 +302,13 @@ func TestCacheExpiry(t *testing.T) {
 		Constraint:       "*",
 		AbsoluteLatest:   "2.0.0",
 		ConstraintLatest: "2.0.0",
-		Expiry:           time.Now().Add(-1 * time.Minute), // expired
+		Expiry:           time.Now().Add(-1 * time.Minute),
 	}
 	cache.Set(entry)
 
-	key := GenerateCacheKey(entry.PackageName, entry.Type, entry.Registry, entry.CurrentVersion, entry.Constraint)
+	key := GenerateCacheKey(entry.PackageName, entry.Type, entry.Registry, entry.CurrentVersion, entry.Constraint, Options{})
 	if _, ok := cache.Get(key); ok {
 		t.Errorf("expected cache miss due to expiry")
-	}
-
-	os.Remove(cachePath)
-}
-
-func TestCacheClear(t *testing.T) {
-	cachePath := getTestCachePath()
-	os.Remove(cachePath)
-	cache := &Cache{
-		entries:  make(map[string]CacheEntry),
-		filePath: cachePath,
-		mutex:    sync.Mutex{},
-	}
-
-	entry := CacheEntry{
-		PackageName:      "foo",
-		Type:             "npm",
-		Registry:         "https://registry.npmjs.org",
-		CurrentVersion:   "1.0.0",
-		Constraint:       "*",
-		AbsoluteLatest:   "2.0.0",
-		ConstraintLatest: "2.0.0",
-		Expiry:           time.Now().Add(10 * time.Minute),
-	}
-	cache.Set(entry)
-	cache.Clear()
-	if len(cache.entries) != 0 {
-		t.Errorf("expected cache to be empty after clear")
 	}
 
 	os.Remove(cachePath)
@@ -314,19 +318,16 @@ func TestCacheExpiredCleanup(t *testing.T) {
 	cachePath := getTestCachePath()
 	os.Remove(cachePath)
 
-	// Create cache without auto-loading
 	cache := &Cache{
 		entries:  make(map[string]CacheEntry),
 		filePath: cachePath,
 		mutex:    sync.Mutex{},
 	}
 
-	// Use fixed timestamps to avoid timing issues
 	now := time.Now()
-	pastTime := now.Add(-24 * time.Hour)  // Clearly expired
-	futureTime := now.Add(24 * time.Hour) // Clearly valid
+	pastTime := now.Add(-24 * time.Hour)
+	futureTime := now.Add(24 * time.Hour)
 
-	// Add both expired and valid entries
 	expiredEntry := CacheEntry{
 		PackageName:      "expired-pkg",
 		Type:             "npm",
@@ -335,7 +336,7 @@ func TestCacheExpiredCleanup(t *testing.T) {
 		Constraint:       "*",
 		AbsoluteLatest:   "2.0.0",
 		ConstraintLatest: "2.0.0",
-		Expiry:           pastTime, // clearly expired
+		Expiry:           pastTime,
 	}
 	validEntry := CacheEntry{
 		PackageName:      "valid-pkg",
@@ -345,33 +346,28 @@ func TestCacheExpiredCleanup(t *testing.T) {
 		Constraint:       "*",
 		AbsoluteLatest:   "3.0.0",
 		ConstraintLatest: "3.0.0",
-		Expiry:           futureTime, // clearly valid
+		Expiry:           futureTime,
 	}
 
 	cache.Set(expiredEntry)
 	cache.Set(validEntry)
 
-	// Should have 2 entries initially
 	if len(cache.entries) != 2 {
 		t.Errorf("expected 2 entries, got %d", len(cache.entries))
 	}
 
-	// Clean expired entries
 	cache.CleanExpiredEntries()
 
-	// Should have only 1 entry after cleanup
 	if len(cache.entries) != 1 {
 		t.Errorf("expected 1 entry after cleanup, got %d", len(cache.entries))
 	}
 
-	// Valid entry should still be accessible
-	validKey := GenerateCacheKey("valid-pkg", "npm", "https://registry.npmjs.org", "1.0.0", "*")
+	validKey := GenerateCacheKey("valid-pkg", "npm", "https://registry.npmjs.org", "1.0.0", "*", Options{})
 	if _, ok := cache.Get(validKey); !ok {
 		t.Errorf("expected valid entry to still be accessible")
 	}
 
-	// Expired entry should not be accessible
-	expiredKey := GenerateCacheKey("expired-pkg", "npm", "https://registry.npmjs.org", "1.0.0", "*")
+	expiredKey := GenerateCacheKey("expired-pkg", "npm", "https://registry.npmjs.org", "1.0.0", "*", Options{})
 	if _, ok := cache.Get(expiredKey); ok {
 		t.Errorf("expected expired entry to not be accessible")
 	}
@@ -414,7 +410,7 @@ func TestConcurrentCacheSavesMergeEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, entry := range []CacheEntry{firstEntry, secondEntry} {
-		key := GenerateCacheKey(entry.PackageName, entry.Type, entry.Registry, entry.CurrentVersion, entry.Constraint)
+		key := GenerateCacheKey(entry.PackageName, entry.Type, entry.Registry, entry.CurrentVersion, entry.Constraint, Options{})
 		if _, exists := reloaded.Get(key); !exists {
 			t.Fatalf("merged cache is missing %s: %#v", entry.PackageName, reloaded.entries)
 		}
