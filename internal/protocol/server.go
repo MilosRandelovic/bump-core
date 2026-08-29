@@ -16,7 +16,39 @@ import (
 
 const maxConcurrentRequests = 8
 
-// Server handles JSON protocol communication over stdin/stdout
+type detectDependencyFunc func(
+	directory string,
+	log shared.LogFunc,
+) (filePath string, registryType shared.RegistryType, err error)
+
+type parseDependenciesFunc func(
+	filePath string,
+	registryType shared.RegistryType,
+	options shared.Options,
+	log shared.LogFunc,
+) (dependencies []shared.Dependency, err error)
+
+type checkOutdatedFunc func(
+	ctx context.Context,
+	dependencies []shared.Dependency,
+	registryType shared.RegistryType,
+	options shared.Options,
+	workingDirectory string,
+	progressCallback shared.ProgressFunc,
+	log shared.LogFunc,
+) (checkResult *shared.CheckResult, err error)
+
+type updateDependenciesFunc func(
+	ctx context.Context,
+	filePath string,
+	outdated []shared.OutdatedDependency,
+	registryType shared.RegistryType,
+	options shared.Options,
+	workingDirectory string,
+	log shared.LogFunc,
+) error
+
+// Server processes newline-delimited JSON requests and emits correlated results, logs, and progress events.
 type Server struct {
 	reader             *bufio.Scanner
 	encoder            *json.Encoder
@@ -26,18 +58,19 @@ type Server struct {
 	activeRequests     map[int]context.CancelFunc
 	requestWorkers     sync.WaitGroup
 	requestSlots       chan struct{}
-	detectDependency   func(string, shared.LogFunc) (string, shared.RegistryType, error)
-	parseDependencies  func(string, shared.RegistryType, shared.Options, shared.LogFunc) ([]shared.Dependency, error)
-	checkOutdated      func(context.Context, []shared.Dependency, shared.RegistryType, shared.Options, string, func(int, int), shared.LogFunc) (*shared.CheckResult, error)
-	updateDependencies func(string, []shared.OutdatedDependency, shared.RegistryType, shared.Options, string, shared.LogFunc) error
+	detectDependency   detectDependencyFunc
+	parseDependencies  parseDependenciesFunc
+	checkOutdated      checkOutdatedFunc
+	updateDependencies updateDependenciesFunc
 }
 
-// NewServer creates a new protocol server using stdin/stdout
+// NewServer returns a protocol server connected to standard input and standard output.
 func NewServer() *Server {
 	return NewServerWithIO(os.Stdin, os.Stdout)
 }
 
-// NewServerWithIO creates a new protocol server with custom I/O streams
+// NewServerWithIO returns a protocol server that reads requests from input and writes responses to output.
+// Input lines may be up to one MiB, and output writes are serialized across concurrent requests.
 func NewServerWithIO(input io.Reader, output io.Writer) *Server {
 	scanner := bufio.NewScanner(input)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
@@ -55,7 +88,8 @@ func NewServerWithIO(input io.Reader, output io.Writer) *Server {
 	}
 }
 
-// Run starts the server loop, reading requests from stdin and writing responses to stdout
+// Run processes requests until input closes or a read or write fails.
+// It waits for active request workers before returning and propagates the terminal I/O error.
 func (s *Server) Run() error {
 	for s.reader.Scan() {
 		line := s.reader.Bytes()
@@ -74,7 +108,11 @@ func (s *Server) Run() error {
 			continue
 		}
 
-		if request.Method == "cancel" {
+		if request.Method == RequestMethodCancel {
+			if s.isRequestActive(request.ID) {
+				s.sendError(request.ID, fmt.Sprintf("request id %d is already active", request.ID))
+				continue
+			}
 			s.handleCancel(&request)
 			if err := s.currentWriteError(); err != nil {
 				s.cancelAllRequests()
@@ -108,7 +146,7 @@ func (s *Server) Run() error {
 	if err := s.reader.Err(); err != nil {
 		s.cancelAllRequests()
 		s.requestWorkers.Wait()
-		return err
+		return fmt.Errorf("failed to read protocol input: %w", err)
 	}
 	s.requestWorkers.Wait()
 	return s.currentWriteError()
@@ -130,11 +168,11 @@ func (s *Server) releaseRequestSlot() {
 // handleRequest routes the request to the appropriate method handler.
 func (s *Server) handleRequest(ctx context.Context, request *Request) {
 	switch request.Method {
-	case "detect":
+	case RequestMethodDetect:
 		s.handleDetect(ctx, request)
-	case "check":
+	case RequestMethodCheck:
 		s.handleCheck(ctx, request)
-	case "update":
+	case RequestMethodUpdate:
 		s.handleUpdate(ctx, request)
 	default:
 		s.sendError(request.ID, fmt.Sprintf("unknown method: %s", request.Method))
@@ -163,6 +201,10 @@ func (s *Server) handleDetect(ctx context.Context, request *Request) {
 	filePath, registryType, err := s.detectDependency(params.Directory, logFunc)
 	if err != nil {
 		s.sendError(request.ID, err.Error())
+		return
+	}
+	if ctx.Err() != nil {
+		s.sendError(request.ID, "detect cancelled")
 		return
 	}
 
@@ -202,8 +244,8 @@ func (s *Server) handleCheck(ctx context.Context, request *Request) {
 		return
 	}
 
-	progressCallback := func(current, total int) {
-		s.sendProgress(request.ID, current, total)
+	progressCallback := func(progress shared.Progress) {
+		s.sendProgress(request.ID, progress)
 	}
 
 	checkResult, err := s.checkOutdated(ctx, dependencies, registryType, options, "", progressCallback, logFunc)
@@ -256,11 +298,14 @@ func (s *Server) handleUpdate(ctx context.Context, request *Request) {
 		return
 	}
 
-	if err := s.updateDependencies(params.FilePath, outdated, registryType, options, "", logFunc); err != nil {
+	if err := s.updateDependencies(ctx, params.FilePath, outdated, registryType, options, "", logFunc); err != nil {
+		if ctx.Err() != nil {
+			s.sendError(request.ID, "update cancelled")
+			return
+		}
 		s.sendError(request.ID, fmt.Sprintf("update error: %v", err))
 		return
 	}
-
 	s.sendResult(request.ID, &UpdateResult{Updated: len(outdated)})
 }
 
@@ -306,12 +351,15 @@ func (s *Server) sendLog(id int, message string) {
 }
 
 // sendProgress encodes a progress update tied to a request ID.
-func (s *Server) sendProgress(id, current, total int) {
+func (s *Server) sendProgress(id int, progress shared.Progress) {
 	s.encode(&ProgressMessage{
-		Type:    "progress",
-		ID:      id,
-		Current: current,
-		Total:   total,
+		Type:        "progress",
+		ID:          id,
+		FilePath:    progress.FilePath,
+		FileCurrent: progress.FileCurrent,
+		FileTotal:   progress.FileTotal,
+		Current:     progress.Current,
+		Total:       progress.Total,
 	})
 }
 
@@ -341,6 +389,13 @@ func (s *Server) registerRequest(id int) (context.Context, context.CancelFunc, b
 	ctx, cancel := context.WithCancel(context.Background())
 	s.activeRequests[id] = cancel
 	return ctx, cancel, true
+}
+
+func (s *Server) isRequestActive(id int) bool {
+	s.activeMutex.Lock()
+	defer s.activeMutex.Unlock()
+	_, exists := s.activeRequests[id]
+	return exists
 }
 
 func (s *Server) unregisterRequest(id int) {

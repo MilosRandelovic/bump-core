@@ -19,12 +19,13 @@ func (parser *Parser) log(format string, args ...any) {
 	}
 }
 
-// NewParser creates a new Dart parser
+// NewParser returns a Pub parser. Set Parser.Log to receive optional diagnostics.
 func NewParser() *Parser {
 	return &Parser{}
 }
 
-// ParseDependencies parses a pubspec.yaml file and extracts dependencies
+// ParseDependencies reads registry-backed dependencies and dev dependencies from a pubspec.yaml file.
+// SDK, path, Git, and unconstrained dependencies are excluded.
 func (parser *Parser) ParseDependencies(filePath string, options shared.Options) ([]shared.Dependency, error) {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
@@ -152,6 +153,7 @@ type packageInfo struct {
 
 // toDependency converts packageInfo to shared.Dependency if it should be included
 func (info *packageInfo) toDependency(section shared.DependencyType, filePath string) *shared.Dependency {
+
 	// Skip SDK dependencies
 	if info.sdk != "" {
 		return nil
@@ -251,11 +253,6 @@ func shouldIncludeDependency(name, version string) bool {
 	}
 
 	return true
-}
-
-// GetRegistryType returns the registry type this parser handles
-func (parser *Parser) GetRegistryType() shared.RegistryType {
-	return shared.Pub
 }
 
 // Ensure Parser implements the interface

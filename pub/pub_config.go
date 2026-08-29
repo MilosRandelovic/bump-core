@@ -9,26 +9,26 @@ import (
 	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
 
-// PubConfig holds configuration for pub registries
-type PubConfig struct {
-	Registries map[string]RegistryConfig // maps registry hostname to config
+// pubConfig holds configuration for pub registries
+type pubConfig struct {
+	Registries map[string]registryConfig // maps registry hostname to config
 }
 
-// RegistryConfig holds configuration for a specific registry
-type RegistryConfig struct {
+// registryConfig holds configuration for a specific registry
+type registryConfig struct {
 	URL       string
 	AuthToken string
 }
 
 // parsePubConfig parses pub configuration from various sources
 // This mimics how pub handles registry configuration
-func parsePubConfig(log shared.LogFunc) (*PubConfig, error) {
-	config := &PubConfig{
-		Registries: make(map[string]RegistryConfig),
+func parsePubConfig(log shared.LogFunc) (*pubConfig, error) {
+	config := &pubConfig{
+		Registries: make(map[string]registryConfig),
 	}
 
 	// Add default pub.dev registry
-	config.Registries["pub.dev"] = RegistryConfig{
+	config.Registries["pub.dev"] = registryConfig{
 		URL: "https://pub.dev",
 	}
 
@@ -43,10 +43,10 @@ func parsePubConfig(log shared.LogFunc) (*PubConfig, error) {
 }
 
 // parsePubTokensConfig reads authentication tokens from dart pub cache
-func parsePubTokensConfig(config *PubConfig) error {
+func parsePubTokensConfig(config *pubConfig) error {
 	configDir, err := os.UserConfigDir()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to resolve user config directory: %w", err)
 	}
 
 	// Check for pub-tokens.json file where dart pub token add stores credentials
@@ -58,26 +58,26 @@ func parsePubTokensConfig(config *PubConfig) error {
 	return parsePubTokensFile(pubTokensPath, config)
 }
 
-// PubTokensFile represents the structure of pub-tokens.json
-type PubTokensFile struct {
+// pubTokensFile represents the structure of pub-tokens.json
+type pubTokensFile struct {
 	Version int               `json:"version"`
-	Hosted  []PubTokensHosted `json:"hosted"`
+	Hosted  []pubTokensHosted `json:"hosted"`
 }
 
-// PubTokensHosted represents a hosted registry entry in pub-tokens.json
-type PubTokensHosted struct {
+// pubTokensHosted represents a hosted registry entry in pub-tokens.json
+type pubTokensHosted struct {
 	URL   string `json:"url"`
 	Token string `json:"token"`
 }
 
 // parsePubTokensFile parses the pub-tokens.json file created by dart pub token add
-func parsePubTokensFile(filePath string, config *PubConfig) error {
+func parsePubTokensFile(filePath string, config *pubConfig) error {
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to read pub-tokens.json: %w", err)
 	}
 
-	var tokensFile PubTokensFile
+	var tokensFile pubTokensFile
 	if err := json.Unmarshal(data, &tokensFile); err != nil {
 		return fmt.Errorf("failed to parse pub-tokens.json: %w", err)
 	}
@@ -89,8 +89,9 @@ func parsePubTokensFile(filePath string, config *PubConfig) error {
 			existingConfig.AuthToken = hosted.Token
 			config.Registries[hostname] = existingConfig
 		} else {
+
 			// Create new registry config with token
-			config.Registries[hostname] = RegistryConfig{
+			config.Registries[hostname] = registryConfig{
 				URL:       hosted.URL,
 				AuthToken: hosted.Token,
 			}

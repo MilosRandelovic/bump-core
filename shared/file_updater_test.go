@@ -10,12 +10,38 @@ import (
 
 type testPatternProvider struct{}
 
+type invalidPatternProvider struct{}
+
 func (testPatternProvider) GetPattern(dependency OutdatedDependency) string {
 	return `("` + regexp.QuoteMeta(dependency.Name) + `"\s*:\s*")([^"]*)"`
 }
 
-func (testPatternProvider) GetReplacement(_ OutdatedDependency, newVersion string) string {
+func (testPatternProvider) GetReplacement(dependency OutdatedDependency, newVersion string) string {
 	return `${1}` + newVersion + `"`
+}
+
+func (invalidPatternProvider) GetPattern(dependency OutdatedDependency) string {
+	return `(`
+}
+
+func (invalidPatternProvider) GetReplacement(dependency OutdatedDependency, newVersion string) string {
+	return newVersion
+}
+
+func TestPrepareDependenciesInFileRejectsInvalidPattern(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "package.json")
+	if err := os.WriteFile(filePath, []byte("{\n  \"dependencies\": {\n    \"example\": \"1.0.0\"\n  }\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := PrepareDependenciesInFile(filePath, []OutdatedDependency{{
+		BaseDependency: BaseDependency{Name: "example", OriginalVersion: "1.0.0", LineNumber: 3},
+		CurrentVersion: "1.0.0",
+		LatestVersion:  "1.1.0",
+	}}, invalidPatternProvider{})
+	if err == nil || !strings.Contains(err.Error(), "invalid update pattern") {
+		t.Fatalf("expected invalid-pattern error, got %v", err)
+	}
 }
 
 func TestPrepareDependenciesInFileRejectsStaleVersionWithoutWriting(t *testing.T) {

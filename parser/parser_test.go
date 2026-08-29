@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,12 +9,20 @@ import (
 	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
 
+func TestParseDependenciesRejectsUnsupportedRegistry(t *testing.T) {
+	_, err := ParseDependencies("package.json", shared.RegistryType(99), shared.Options{})
+	if !errors.Is(err, shared.ErrUnsupportedRegistryType) {
+		t.Fatalf("expected unsupported-registry error, got %v", err)
+	}
+}
+
 func TestParsePackageJson(t *testing.T) {
+
 	// Create a temporary package.json file
 	tempDir := t.TempDir()
-	packageJsonPath := filepath.Join(tempDir, "package.json")
+	packageJSONPath := filepath.Join(tempDir, "package.json")
 
-	packageJsonContent := `{
+	packageJSONContent := `{
 		"dependencies": {
 			"react": "^18.0.0",
 			"lodash": "~4.17.20"
@@ -23,12 +32,12 @@ func TestParsePackageJson(t *testing.T) {
 		}
 	}`
 
-	err := os.WriteFile(packageJsonPath, []byte(packageJsonContent), 0644)
+	err := os.WriteFile(packageJSONPath, []byte(packageJSONContent), 0644)
 	if err != nil {
 		t.Fatalf("Failed to create test file: %v", err)
 	}
 
-	dependencies, err := ParseDependencies(packageJsonPath, shared.Npm, shared.Options{})
+	dependencies, err := ParseDependencies(packageJSONPath, shared.NPM, shared.Options{})
 	if err != nil {
 		t.Fatalf("Failed to parse package.json: %v", err)
 	}
@@ -73,6 +82,7 @@ func TestParsePackageJson(t *testing.T) {
 }
 
 func TestParsePubspecYaml(t *testing.T) {
+
 	// Create a temporary pubspec.yaml file
 	tempDir := t.TempDir()
 	pubspecPath := filepath.Join(tempDir, "pubspec.yaml")

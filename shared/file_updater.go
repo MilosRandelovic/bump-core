@@ -19,7 +19,8 @@ type PreparedFileUpdate struct {
 	mode     fs.FileMode
 }
 
-// PrepareDependenciesInFile validates and renders all dependency edits without modifying the file.
+// PrepareDependenciesInFile validates and renders every requested edit without modifying the file.
+// It resolves symlink targets, preserves file mode, rejects hard links and stale source locations, and returns nil for no edits.
 func PrepareDependenciesInFile(filePath string, outdated []OutdatedDependency, patternProvider PatternProvider) (*PreparedFileUpdate, error) {
 	// If no dependencies to update, return early
 	if len(outdated) == 0 {
@@ -63,7 +64,10 @@ func PrepareDependenciesInFile(filePath string, outdated []OutdatedDependency, p
 
 		// Get the pattern from the provider
 		pattern := patternProvider.GetPattern(dependency)
-		versionRegex := regexp.MustCompile(pattern)
+		versionRegex, err := regexp.Compile(pattern)
+		if err != nil {
+			return nil, fmt.Errorf("invalid update pattern for dependency %s: %w", dependency.Name, err)
+		}
 		allMatches := versionRegex.FindAllStringSubmatchIndex(line, -1)
 		if len(allMatches) == 0 {
 			return nil, fmt.Errorf("could not find %s on line %d for updating", dependency.Name, dependency.LineNumber)
@@ -148,7 +152,8 @@ func fileLinkCount(info fs.FileInfo) uint64 {
 	return 1
 }
 
-// Apply atomically writes a previously validated dependency file edit.
+// Apply atomically replaces the prepared target while preserving its file mode.
+// Validation is not repeated, so callers must hold any transaction lock from preparation through Apply.
 func (update *PreparedFileUpdate) Apply() error {
 	temporaryFile, err := os.CreateTemp(filepath.Dir(update.filePath), "."+filepath.Base(update.filePath)+".bump-*")
 	if err != nil {

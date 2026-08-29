@@ -7,9 +7,20 @@ import (
 	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
 
+// RequestMethod identifies a supported sidecar operation.
+type RequestMethod string
+
+// Supported request methods.
+const (
+	RequestMethodDetect RequestMethod = "detect"
+	RequestMethodCheck  RequestMethod = "check"
+	RequestMethodUpdate RequestMethod = "update"
+	RequestMethodCancel RequestMethod = "cancel"
+)
+
 // Request represents an incoming JSON-RPC-like request over stdin
 type Request struct {
-	Method string          `json:"method"`
+	Method RequestMethod   `json:"method"`
 	ID     int             `json:"id"`
 	Params json.RawMessage `json:"params,omitempty"`
 }
@@ -40,10 +51,13 @@ type LogMessage struct {
 
 // ProgressMessage is an out-of-band progress update sent during processing
 type ProgressMessage struct {
-	Type    string `json:"type"`
-	ID      int    `json:"id"`
-	Current int    `json:"current"`
-	Total   int    `json:"total"`
+	Type        string `json:"type"`
+	ID          int    `json:"id"`
+	FilePath    string `json:"filePath"`
+	FileCurrent int    `json:"fileCurrent"`
+	FileTotal   int    `json:"fileTotal"`
+	Current     int    `json:"current"`
+	Total       int    `json:"total"`
 }
 
 // CancelParams identifies an active request to cancel.
@@ -79,6 +93,7 @@ type OptionsParams struct {
 	NoCache                 bool `json:"noCache"`
 	IncludePeerDependencies bool `json:"includePeerDependencies"`
 	Monorepo                bool `json:"monorepo"`
+	MinimumAge              bool `json:"minimumAge"`
 }
 
 // OutdatedDependencyInfo is the JSON representation of an outdated dependency
@@ -133,19 +148,20 @@ type CancelResult struct {
 	Cancelled bool `json:"cancelled"`
 }
 
-// ToOptions converts OptionsParams to shared.Options
+// ToOptions maps every wire-level option to its shared library equivalent.
 func (o OptionsParams) ToOptions() shared.Options {
 	return shared.Options{
-		Verbose:                 o.Verbose,
-		Update:                  o.Update,
-		Semver:                  o.Semver,
-		NoCache:                 o.NoCache,
-		IncludePeerDependencies: o.IncludePeerDependencies,
-		Monorepo:                o.Monorepo,
+		Verbose:                  o.Verbose,
+		Update:                   o.Update,
+		Semver:                   o.Semver,
+		NoCache:                  o.NoCache,
+		IncludePeerDependencies:  o.IncludePeerDependencies,
+		Monorepo:                 o.Monorepo,
+		EnforceMinimumReleaseAge: o.MinimumAge,
 	}
 }
 
-// FromCheckResult converts a shared.CheckResult to a protocol CheckResult
+// FromCheckResult converts library results to their JSON protocol representation without reordering them.
 func FromCheckResult(checkResult *shared.CheckResult) *CheckResult {
 	result := &CheckResult{
 		Outdated:      make([]OutdatedDependencyInfo, 0, len(checkResult.Outdated)),
@@ -188,7 +204,7 @@ func FromCheckResult(checkResult *shared.CheckResult) *CheckResult {
 	return result
 }
 
-// ToOutdatedDependencies converts protocol OutdatedDependencyInfo slice to shared.OutdatedDependency slice.
+// ToOutdatedDependencies converts wire-level updates to library dependencies and rejects unknown dependency types.
 func ToOutdatedDependencies(infos []OutdatedDependencyInfo) ([]shared.OutdatedDependency, error) {
 	result := make([]shared.OutdatedDependency, 0, len(infos))
 	for _, info := range infos {
@@ -219,11 +235,11 @@ func ToOutdatedDependencies(infos []OutdatedDependencyInfo) ([]shared.OutdatedDe
 	return result, nil
 }
 
-// ParseRegistryType converts a string to shared.RegistryType
+// ParseRegistryType converts the supported wire values "npm" and "pub" to shared.RegistryType.
 func ParseRegistryType(s string) (shared.RegistryType, error) {
 	switch s {
 	case "npm":
-		return shared.Npm, nil
+		return shared.NPM, nil
 	case "pub":
 		return shared.Pub, nil
 	default:

@@ -10,42 +10,48 @@ import (
 	"strings"
 )
 
-// NpmConfig holds the parsed .npmrc configuration
-type NpmConfig struct {
+// npmConfig holds the parsed .npmrc configuration
+type npmConfig struct {
 	ScopeRegistries map[string]string // maps scope to registry URL
 	AuthTokens      map[string]string // maps registry to auth token
 }
 
 // parseNpmrcFiles parses both local and global .npmrc files and merges their configurations
 // Local .npmrc takes precedence for scope registries, global .npmrc provides auth tokens
-func parseNpmrcFiles(localPath string) (*NpmConfig, error) {
-	config := &NpmConfig{
+func parseNpmrcFiles(localPath string) (*npmConfig, error) {
+	config := &npmConfig{
 		ScopeRegistries: make(map[string]string),
 		AuthTokens:      make(map[string]string),
 	}
 
 	// Parse global .npmrc first (from home directory)
 	homeDir, err := os.UserHomeDir()
-	if err == nil {
-		globalNpmrcPath := filepath.Join(homeDir, ".npmrc")
-		globalConfig, err := parseNpmrcFile(globalNpmrcPath)
-		if err == nil {
-			// Copy global config
-			maps.Copy(config.ScopeRegistries, globalConfig.ScopeRegistries)
-			maps.Copy(config.AuthTokens, globalConfig.AuthTokens)
-		}
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve home directory: %w", err)
 	}
+	globalNpmrcPath := filepath.Join(homeDir, ".npmrc")
+	globalConfig, err := parseNpmrcFile(globalNpmrcPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse global .npmrc: %w", err)
+	}
+
+	// Copy global config
+	maps.Copy(config.ScopeRegistries, globalConfig.ScopeRegistries)
+	maps.Copy(config.AuthTokens, globalConfig.AuthTokens)
 
 	// Parse local .npmrc (overrides global for scope registries)
 	localConfig, err := parseNpmrcFile(localPath)
 	if err != nil {
+
 		// If local file doesn't exist, that's okay, we still have global config
 		if !os.IsNotExist(err) {
-			return nil, err
+			return nil, fmt.Errorf("failed to parse local .npmrc: %w", err)
 		}
 	} else {
+
 		// Local scope registries override global ones
 		maps.Copy(config.ScopeRegistries, localConfig.ScopeRegistries)
+
 		// Local auth tokens override global ones
 		maps.Copy(config.AuthTokens, localConfig.AuthTokens)
 	}
@@ -53,8 +59,8 @@ func parseNpmrcFiles(localPath string) (*NpmConfig, error) {
 	return config, nil
 }
 
-func parseNpmrcFile(filePath string) (*NpmConfig, error) {
-	config := &NpmConfig{
+func parseNpmrcFile(filePath string) (*npmConfig, error) {
+	config := &npmConfig{
 		ScopeRegistries: make(map[string]string),
 		AuthTokens:      make(map[string]string),
 	}
@@ -62,6 +68,7 @@ func parseNpmrcFile(filePath string) (*NpmConfig, error) {
 	file, err := os.Open(filePath)
 	if err != nil {
 		if os.IsNotExist(err) {
+
 			// Return empty config if file doesn't exist
 			return config, nil
 		}
@@ -119,7 +126,8 @@ func parseNpmrcFile(filePath string) (*NpmConfig, error) {
 }
 
 // getRegistryForPackage determines the appropriate registry URL for a package
-func getRegistryForPackage(packageName string, npmrcConfig *NpmConfig) string {
+func getRegistryForPackage(packageName string, npmrcConfig *npmConfig) string {
+
 	// Check if it's a scoped package
 	if strings.HasPrefix(packageName, "@") {
 		if index := strings.Index(packageName[1:], "/"); index != -1 {
@@ -135,7 +143,7 @@ func getRegistryForPackage(packageName string, npmrcConfig *NpmConfig) string {
 }
 
 // getAuthTokenForRegistry finds the appropriate auth token for a registry URL
-func getAuthTokenForRegistry(registryURL string, npmrcConfig *NpmConfig) string {
+func getAuthTokenForRegistry(registryURL string, npmrcConfig *npmConfig) string {
 	target := normalizeRegistryAuthKey(registryURL)
 	longestMatch := ""
 	matchedToken := ""

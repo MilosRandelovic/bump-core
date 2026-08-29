@@ -10,14 +10,14 @@ import (
 // PatternProvider implements the pattern provider for npm package.json files
 type PatternProvider struct{}
 
-// GetPattern returns the regex pattern for matching npm dependency lines
+// GetPattern returns a regular expression whose second capture group contains the dependency constraint.
 func (patternProvider *PatternProvider) GetPattern(dependency shared.OutdatedDependency) string {
 	// Look for: "package-name": "old-version"
 	escapedName := regexp.QuoteMeta(dependency.Name)
 	return fmt.Sprintf(`("%s"\s*:\s*)"([^"]*)"`, escapedName)
 }
 
-// GetReplacement returns the replacement string for npm dependency lines
+// GetReplacement returns a regexp expansion template that replaces the constraint and preserves the JSON key and spacing.
 func (patternProvider *PatternProvider) GetReplacement(dependency shared.OutdatedDependency, newVersion string) string {
 	return fmt.Sprintf(`${1}"%s"`, newVersion)
 }
@@ -27,14 +27,14 @@ type Updater struct {
 	patternProvider *PatternProvider
 }
 
-// NewUpdater creates a new npm updater
+// NewUpdater returns an npm updater with its package.json pattern provider initialized.
 func NewUpdater() *Updater {
 	return &Updater{
 		patternProvider: &PatternProvider{},
 	}
 }
 
-// GetPatternProvider returns the pattern provider for npm
+// GetPatternProvider returns the package.json pattern provider and also initializes a zero-value Updater.
 func (updater *Updater) GetPatternProvider() shared.PatternProvider {
 	if updater.patternProvider == nil {
 		updater.patternProvider = &PatternProvider{}
@@ -42,12 +42,7 @@ func (updater *Updater) GetPatternProvider() shared.PatternProvider {
 	return updater.patternProvider
 }
 
-// GetRegistryType returns the registry type this updater handles
-func (updater *Updater) GetRegistryType() shared.RegistryType {
-	return shared.Npm
-}
-
-// ValidateOptions validates options for npm updates
+// ValidateOptions accepts all currently defined update options for npm.
 func (updater *Updater) ValidateOptions(options shared.Options) error {
 	// npm has no special option requirements
 	return nil

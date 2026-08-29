@@ -90,7 +90,7 @@ jobs:
 
     - name: Create GitHub Release
       if: steps.check_tag.outputs.skip != 'true'
-      run: gh release create "$RELEASE_TAG" --title "Release $RELEASE_TAG" --notes-file "$RELEASE_NOTES_FILE"
+      run: gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file "$RELEASE_NOTES_FILE"
       env:
         GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         RELEASE_TAG: ${{ steps.version.outputs.tag }}
