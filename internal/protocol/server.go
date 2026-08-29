@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sync"
 
+	"github.com/MilosRandelovic/bump-core/v2/internal/dependency"
 	"github.com/MilosRandelovic/bump-core/v2/parser"
 	"github.com/MilosRandelovic/bump-core/v2/shared"
 	"github.com/MilosRandelovic/bump-core/v2/updater"
@@ -214,7 +216,7 @@ func (s *Server) handleDetect(ctx context.Context, request *Request) {
 	})
 }
 
-// handleCheck parses the dependency file and checks all dependencies for available updates.
+// handleCheck parses the dependency file and checks the selected dependencies for available updates.
 func (s *Server) handleCheck(ctx context.Context, request *Request) {
 	var params CheckParams
 	if err := json.Unmarshal(request.Params, &params); err != nil {
@@ -241,6 +243,11 @@ func (s *Server) handleCheck(ctx context.Context, request *Request) {
 	dependencies, err := s.parseDependencies(params.FilePath, registryType, options, logFunc)
 	if err != nil {
 		s.sendError(request.ID, fmt.Sprintf("parse error: %v", err))
+		return
+	}
+	dependencies, err = dependency.Filter(dependencies, params.Targets, filepath.Dir(params.FilePath))
+	if err != nil {
+		s.sendError(request.ID, fmt.Sprintf("invalid check targets: %v", err))
 		return
 	}
 

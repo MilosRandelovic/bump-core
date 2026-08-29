@@ -14,7 +14,10 @@ Go consumers such as `homebrew-bump` import the public packages directly. Other 
 
 ```text
 cmd/bump-core/        Sidecar entry point
+cmd/bump-mcp/         MCP server entry point
+internal/mcp/         MCP tool implementation
 internal/protocol/    Sidecar protocol implementation
+internal/dependency/    Shared MCP and sidecar dependency-target selection
 parser/               Dependency-file detection and parser delegation
 updater/              Registry checks and dependency-update orchestration
 npm/                  package.json, .npmrc, and npm registry support
@@ -25,6 +28,7 @@ shared/               Shared types, cache, version helpers, file updates, and lo
 - Keep `npm` and `pub` independent; ecosystem-specific behavior belongs in its ecosystem package.
 - Put cross-ecosystem types and helpers in `shared`.
 - Keep sidecar-only behavior under `internal/protocol`.
+- Keep MCP-only behavior under `internal/mcp`.
 - Registry HTTP access belongs in the npm/pub registry clients. Filesystem access belongs in parsers, configuration loaders, cache persistence, and file updates.
 - Library packages must not print to stdout or stderr. Use `shared.LogFunc` for optional diagnostics. The sidecar protocol owns stdout; `cmd/bump-core` may use stderr for a fatal server error and stdout for `--version`.
 
@@ -52,8 +56,9 @@ Each input and output message occupies one JSON line. Request IDs are integers; 
 ```json
 {"method":"detect","id":1,"params":{"directory":"/path/to/project"}}
 {"method":"check","id":2,"params":{"filePath":"/path/to/package.json","registryType":"npm","options":{}}}
-{"method":"update","id":3,"params":{"filePath":"/path/to/package.json","registryType":"npm","options":{},"outdated":[]}}
-{"method":"cancel","id":4,"params":{"id":2}}
+{"method":"check","id":3,"params":{"filePath":"/path/to/package.json","registryType":"npm","options":{"semver":true},"targets":[{"name":"react"}]}}
+{"method":"update","id":4,"params":{"filePath":"/path/to/package.json","registryType":"npm","options":{},"outdated":[]}}
+{"method":"cancel","id":5,"params":{"id":2}}
 ```
 
 ### Responses and events
@@ -73,6 +78,18 @@ Each input and output message occupies one JSON line. Request IDs are integers; 
 - Cancellation is checked before starting registry work and before dependency-update prepare/apply operations.
 - All writes go through the server's synchronized encoder. Never write unrelated content to sidecar stdout.
 - Keep logs, progress, cancellation, and terminal responses correlated with the originating request ID.
+- A `check` request may select dependencies by exact package name, dependency type, file path, or any combination. Fields within a target are intersected; multiple targets form a union; omitted targets select every parsed dependency. Reject invalid and unmatched targets.
+- The request options choose one version policy for the selected targets: neither `semver` nor `minimumAge` means absolute latest; either flag applies its restriction; both flags combine them.
+
+## MCP Server
+
+- `bump-mcp` is a stdio MCP server built with the official Go SDK.
+- `check_updates` accepts a project directory, dependency options, and optional targets, detects the supported dependency file, and returns structured updates, skipped dependencies, errors, diagnostics, and a `checkId`.
+- `update_dependencies` accepts a single-use `checkId` and applies only the exact result stored by the corresponding check. Never accept model-supplied replacement versions.
+- Keep MCP version-policy and target-selection behavior identical to the sidecar protocol.
+- Preserve MCP cancellation by passing the tool context through registry checks and updates.
+- Forward dependency-check progress when the client supplies an MCP progress token.
+- MCP stdout is reserved for protocol messages. Fatal startup or transport errors go to stderr.
 
 ## Registry Check Concurrency
 
@@ -104,6 +121,7 @@ Each input and output message occupies one JSON line. Request IDs are integers; 
 ## Versioning and Releases
 
 - `shared.Version` is the single source of truth for the release version.
+- The Homebrew formula installs `bump-mcp` alongside `bump` by building the command from the pinned bump-core module version.
 - Every release version must have an exact `## [x.y.z]` section in `CHANGELOG.md` before merging to `main`.
 - Major-version import paths must follow Go module rules; v2 imports include `/v2`.
 - The release workflow runs on pushes to `main`, rejects an existing tag, creates the tag and GitHub release, and then opens a dependency-update pull request in `homebrew-bump`.
