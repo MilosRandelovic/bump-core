@@ -142,6 +142,43 @@ func TestServerCheckWiresVerboseLogsAndGlobalProgress(t *testing.T) {
 	}
 }
 
+func TestServerCheckFiltersTargets(t *testing.T) {
+	projectDirectory := t.TempDir()
+	rootPath := filepath.Join(projectDirectory, "package.json")
+	workspacePath := filepath.Join(projectDirectory, "packages", "app", "package.json")
+	messages := runProtocol(t, map[string]any{
+		"method": "check",
+		"id":     9,
+		"params": map[string]any{
+			"filePath":     rootPath,
+			"registryType": "npm",
+			"options":      map[string]any{},
+			"targets": []map[string]any{
+				{"name": "root-package"},
+				{"type": "devDependencies", "filePath": "packages/app/package.json"},
+			},
+		},
+	}, func(server *Server) {
+		server.parseDependencies = func(filePath string, registryType shared.RegistryType, options shared.Options, log shared.LogFunc) ([]shared.Dependency, error) {
+			return []shared.Dependency{
+				{BaseDependency: shared.BaseDependency{Name: "root-package", Type: shared.Dependencies, FilePath: rootPath}},
+				{BaseDependency: shared.BaseDependency{Name: "ignored-package", Type: shared.Dependencies, FilePath: workspacePath}},
+				{BaseDependency: shared.BaseDependency{Name: "workspace-tool", Type: shared.DevDependencies, FilePath: workspacePath}},
+			}, nil
+		}
+		server.checkOutdated = func(ctx context.Context, dependencies []shared.Dependency, registryType shared.RegistryType, options shared.Options, workingDirectory string, progress shared.ProgressFunc, log shared.LogFunc) (*shared.CheckResult, error) {
+			if len(dependencies) != 2 || dependencies[0].Name != "root-package" || dependencies[1].Name != "workspace-tool" {
+				return nil, fmt.Errorf("unexpected selected dependencies: %+v", dependencies)
+			}
+			return &shared.CheckResult{}, nil
+		}
+	})
+
+	if len(messages) != 1 || messageType(t, messages[0]) != "result" {
+		t.Fatalf("unexpected messages: %#v", messages)
+	}
+}
+
 func TestServerUpdateEndToEnd(t *testing.T) {
 	filePath := filepath.Join(t.TempDir(), "package.json")
 	content := "{\n  \"dependencies\": {\n    \"example\": \"^1.0.0\"\n  }\n}\n"

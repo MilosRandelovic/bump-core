@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/MilosRandelovic/bump-core/v2/internal/dependency"
 	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
 
@@ -72,9 +73,10 @@ type DetectParams struct {
 
 // CheckParams are the parameters for the "check" method
 type CheckParams struct {
-	FilePath     string        `json:"filePath"`
-	RegistryType string        `json:"registryType"`
-	Options      OptionsParams `json:"options"`
+	FilePath     string                `json:"filePath"`
+	RegistryType string                `json:"registryType"`
+	Options      OptionsParams         `json:"options"`
+	Targets      []dependency.Selector `json:"targets,omitempty"`
 }
 
 // UpdateParams are the parameters for the "update" method

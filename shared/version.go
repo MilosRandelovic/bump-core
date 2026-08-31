@@ -10,7 +10,7 @@ import (
 )
 
 // Version is the single source of truth for the bump version across all repos
-const Version = "2.1.0"
+const Version = "2.2.0"
 
 var (
 	versionPrefixCaptureRegex = regexp.MustCompile(`^([\^~>=<]+)`)

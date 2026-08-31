@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.0]
+
+- Add a stdio MCP server for scoped absolute, semver-compatible, and minimum-age npm and Pub dependency checks and updates
+- Return typed structured tool results and bind updates to a single-use checked result
+- Propagate MCP cancellation and dependency-check progress through bump-core
+- Add the same package, dependency-type, and file targeting to the sidecar protocol
+
 ## [2.1.0]
 
 - Add a fixed 24-hour minimum release age for npm and Pub version suggestions
