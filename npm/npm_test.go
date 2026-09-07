@@ -110,6 +110,20 @@ func TestRegistryClientMinimumAgeRejectsUnverifiableVersions(t *testing.T) {
 	}
 }
 
+func TestRegistryClientRejectsOversizedResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Length", fmt.Sprint(maxRegistryResponseSize+1))
+		response.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := NewRegistryClient()
+	_, err := client.fetchPackageInfo(context.Background(), "example", server.URL, &npmConfig{})
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized response error = %v", err)
+	}
+}
+
 func TestParsePackageJson(t *testing.T) {
 
 	// Create a temporary package.json file
@@ -1570,7 +1584,7 @@ func TestMonorepoBestEffortOnInvalidWorkspacePackage(t *testing.T) {
 	}
 
 	parser := NewParser()
-	dependencies, err := parser.ParseDependencies(rootPath, shared.Options{Monorepo: true, Verbose: true})
+	dependencies, err := parser.ParseDependencies(rootPath, shared.Options{Monorepo: true})
 	if err != nil {
 		t.Fatalf("Expected best-effort parsing, got error: %v", err)
 	}

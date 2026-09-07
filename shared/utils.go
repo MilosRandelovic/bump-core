@@ -8,17 +8,13 @@ import (
 
 // ExtractHostname returns a lowercase host without protocol, path, or port for registry matching.
 func ExtractHostname(url string) string {
-
-	// Remove protocol
 	url, _ = strings.CutPrefix(url, "https://")
 	url, _ = strings.CutPrefix(url, "http://")
 
-	// Remove path
 	if index := strings.Index(url, "/"); index != -1 {
 		url = url[:index]
 	}
 
-	// Remove port
 	if index := strings.Index(url, ":"); index != -1 {
 		url = url[:index]
 	}

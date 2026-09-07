@@ -294,6 +294,20 @@ func TestRegistryClientRejectsEmptyLatestVersion(t *testing.T) {
 	}
 }
 
+func TestRegistryClientRejectsOversizedResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Length", fmt.Sprint(maxRegistryResponseSize+1))
+		response.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := NewRegistryClient()
+	_, err := client.fetchPackageInfo(context.Background(), "example", registryConfig{URL: server.URL})
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized response error = %v", err)
+	}
+}
+
 func TestUpdatePubspecYaml(t *testing.T) {
 
 	// Create a temporary pubspec.yaml file

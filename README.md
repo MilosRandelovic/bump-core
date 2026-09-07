@@ -2,6 +2,12 @@
 
 Core library and sidecar binary for the [Bump](https://github.com/MilosRandelovic/homebrew-bump) dependency update tool. Contains all business logic for checking and updating dependencies in `package.json` (npm) and `pubspec.yaml` (Dart/Flutter pub) projects.
 
+## Installation
+
+```sh
+go get github.com/MilosRandelovic/bump-core/v2@latest
+```
+
 ## Usage
 
 ### As a Go library
@@ -17,7 +23,10 @@ import (
 	"github.com/MilosRandelovic/bump-core/v2/updater"
 )
 
+directory := "."
 filePath, registryType, err := parser.AutoDetectDependencyFile(directory, nil)
+
+options := shared.Options{}
 
 dependencies, err := parser.ParseDependencies(filePath, registryType, options)
 
@@ -66,6 +75,8 @@ Response types:
 
 Requests may run concurrently. Send `cancel` with the target request ID to stop an active check; the cancel result reports whether that request was still active. The sidecar accepts up to eight active requests and rejects additional work with the retryable `request_limit_exceeded` code until a slot is available, while cancellation requests remain available.
 
+Request IDs are required, including when their value is zero. Requests and parameter objects reject unknown fields and trailing JSON values.
+
 ### As an MCP server
 
 The `bump-mcp` stdio server lets coding agents check and update dependencies using the same bump-core logic. Build it and register it with an MCP client:
@@ -97,9 +108,9 @@ The check tool supports absolute latest, semantic-version-compatible latest, fix
 - Bounded parallel registry checks with deterministic results
 - Stale-safe dependency updates with validation across all targets and atomic replacement per file
 
-The persistent cache is stored as versioned JSON in `~/.bump-cache`. Concurrent checks within one process merge their entries during persistence rather than overwriting one another.
+The persistent cache is stored as versioned JSON in `~/.bump-cache`. Concurrent checks and separate `bump` processes merge their entries during persistence rather than overwriting one another.
 
-## Project Structure
+## Project structure
 
 ```txt
 cmd/bump-core/          # Sidecar binary entry point
@@ -127,6 +138,10 @@ make clean     # Remove build artifacts
 
 - [homebrew-bump](https://github.com/MilosRandelovic/homebrew-bump) — CLI tool (imports bump-core as a Go module)
 - [vscode-bump](https://github.com/MilosRandelovic/vscode-bump) — VS Code extension (communicates with the sidecar binary)
+
+## Release
+
+Set `shared.Version`, add the matching `CHANGELOG.md` section, and merge the pull request to `main`. The release workflow builds the sidecar to read its version, creates the version tag and source release, and opens the matching bump-core update pull request in `homebrew-bump`.
 
 ## License
 

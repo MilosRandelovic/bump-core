@@ -27,9 +27,13 @@ func runProtocol(t *testing.T, request any, configure func(*Server)) []map[strin
 	if err != nil {
 		t.Fatal(err)
 	}
+	return runProtocolInput(t, string(requestData)+"\n", configure)
+}
 
+func runProtocolInput(t *testing.T, input string, configure func(*Server)) []map[string]json.RawMessage {
+	t.Helper()
 	var output bytes.Buffer
-	server := NewServerWithIO(strings.NewReader(string(requestData)+"\n"), &output)
+	server := NewServerWithIO(strings.NewReader(input), &output)
 	if configure != nil {
 		configure(server)
 	}
@@ -49,6 +53,16 @@ func runProtocol(t *testing.T, request any, configure func(*Server)) []map[strin
 	return messages
 }
 
+func TestServerRejectsTrailingJSON(t *testing.T) {
+	messages := runProtocolInput(t, `{"method":"detect","id":1,"params":{"directory":"."}} {}`+"\n", nil)
+	if len(messages) != 1 || messageType(t, messages[0]) != "error" {
+		t.Fatalf("unexpected messages: %#v", messages)
+	}
+	if errorMessage := messageError(t, messages[0]); !strings.Contains(errorMessage, "multiple JSON values") {
+		t.Fatalf("error = %q, expected trailing JSON rejection", errorMessage)
+	}
+}
+
 func messageType(t *testing.T, message map[string]json.RawMessage) string {
 	t.Helper()
 	var result string
@@ -56,6 +70,63 @@ func messageType(t *testing.T, message map[string]json.RawMessage) string {
 		t.Fatal(err)
 	}
 	return result
+}
+
+func messageError(t *testing.T, message map[string]json.RawMessage) string {
+	t.Helper()
+	var result string
+	if err := json.Unmarshal(message["error"], &result); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func TestServerRejectsInvalidRequestShapes(t *testing.T) {
+	tests := []struct {
+		name           string
+		request        map[string]any
+		errorSubstring string
+	}{
+		{
+			name: "missing request id",
+			request: map[string]any{
+				"method": "detect",
+				"params": map[string]any{"directory": t.TempDir()},
+			},
+			errorSubstring: "request id is required",
+		},
+		{
+			name: "unknown request field",
+			request: map[string]any{
+				"method":     "detect",
+				"id":         1,
+				"params":     map[string]any{"directory": t.TempDir()},
+				"unexpected": true,
+			},
+			errorSubstring: "unknown field",
+		},
+		{
+			name: "unknown parameter field",
+			request: map[string]any{
+				"method": "detect",
+				"id":     1,
+				"params": map[string]any{"directory": t.TempDir(), "unexpected": true},
+			},
+			errorSubstring: "unknown field",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			messages := runProtocol(t, test.request, nil)
+			if len(messages) != 1 || messageType(t, messages[0]) != "error" {
+				t.Fatalf("unexpected messages: %#v", messages)
+			}
+			if errorMessage := messageError(t, messages[0]); !strings.Contains(errorMessage, test.errorSubstring) {
+				t.Fatalf("error = %q, expected it to contain %q", errorMessage, test.errorSubstring)
+			}
+		})
+	}
 }
 
 func TestServerDetect(t *testing.T) {

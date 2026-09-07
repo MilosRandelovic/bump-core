@@ -15,9 +15,13 @@ import (
 	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
 
-// RegistryClient handles npm registry operations
+const maxRegistryResponseSize = 64 << 20
+
+// RegistryClient resolves package versions from npm registries.
 type RegistryClient struct {
-	Log             shared.LogFunc
+	// Log receives optional registry and authentication diagnostics.
+	Log shared.LogFunc
+	// ConfigDirectory is the project directory containing the applicable .npmrc; an empty value uses the current directory.
 	ConfigDirectory string
 	currentTime     func() time.Time
 	configOnce      sync.Once
@@ -35,7 +39,6 @@ func (client *RegistryClient) log(ctx context.Context, format string, args ...an
 	}
 }
 
-// npmPackageInfo represents the response from npm registry
 type npmPackageInfo struct {
 	DistTags map[string]string `json:"dist-tags"`
 	Time     map[string]string `json:"time"`
@@ -59,7 +62,6 @@ func (client *RegistryClient) GetLatestVersionFromRegistry(ctx context.Context, 
 		return "", err
 	}
 
-	// Check cache first if enabled
 	if cache != nil {
 		key := shared.GenerateCacheKey(packageName, "npm", targetRegistryURL, "", "*", options)
 		if entry, ok := cache.Get(key); ok {
@@ -98,7 +100,6 @@ func (client *RegistryClient) GetLatestVersionFromRegistry(ctx context.Context, 
 
 	if ok {
 
-		// Cache the result if cache is enabled
 		if cache != nil {
 			now := client.now()
 			entry := shared.CacheEntry{
@@ -128,7 +129,6 @@ func (client *RegistryClient) GetBothLatestVersions(ctx context.Context, package
 		return "", "", err
 	}
 
-	// Check cache first if enabled
 	if cache != nil {
 		key := shared.GenerateCacheKey(packageName, "npm", targetRegistryURL, "", constraint, options)
 		if entry, ok := cache.Get(key); ok {
@@ -147,11 +147,8 @@ func (client *RegistryClient) GetBothLatestVersions(ctx context.Context, package
 		return "", "", fmt.Errorf("failed to parse npm response: %w", err)
 	}
 
-	// Get all non-deprecated versions
 	versions := make([]string, 0, len(packageInfo.Versions))
 	for version, versionInfo := range packageInfo.Versions {
-
-		// Include only non-deprecated versions (deprecated field is null/missing for non-deprecated)
 		if versionInfo.Deprecated == nil || versionInfo.Deprecated == "" {
 			versions = append(versions, version)
 		}
@@ -169,7 +166,6 @@ func (client *RegistryClient) GetBothLatestVersions(ctx context.Context, package
 		return absoluteLatest, constraintLatest, err
 	}
 
-	// Cache the result if cache is enabled
 	if cache != nil {
 		now := client.now()
 		entry := shared.CacheEntry{
@@ -227,11 +223,11 @@ func (client *RegistryClient) now() time.Time {
 func (client *RegistryClient) resolveRegistryURL(packageName, registryURL string) (string, *npmConfig, error) {
 	configDirectory := client.ConfigDirectory
 	if configDirectory == "" {
-		currentWorkingDir, err := os.Getwd()
+		currentWorkingDirectory, err := os.Getwd()
 		if err != nil {
 			return "", nil, fmt.Errorf("failed to get current directory: %w", err)
 		}
-		configDirectory = currentWorkingDir
+		configDirectory = currentWorkingDirectory
 	}
 
 	client.configOnce.Do(func() {
@@ -253,7 +249,6 @@ func (client *RegistryClient) resolveRegistryURL(packageName, registryURL string
 	return getRegistryForPackage(packageName, npmrcConfig), npmrcConfig, nil
 }
 
-// fetchPackageInfo is a shared method to fetch package information from registries
 func (client *RegistryClient) fetchPackageInfo(ctx context.Context, packageName, targetRegistryURL string, npmrcConfig *npmConfig) ([]byte, error) {
 	url := fmt.Sprintf("%s/%s", strings.TrimRight(targetRegistryURL, "/"), packageName)
 
@@ -265,7 +260,6 @@ func (client *RegistryClient) fetchPackageInfo(ctx context.Context, packageName,
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Add authentication if available for this registry
 	if authToken := getAuthTokenForRegistry(targetRegistryURL, npmrcConfig); authToken != "" {
 		request.Header.Set("Authorization", "Bearer "+authToken)
 		client.log(ctx, "Using authentication for registry: %s\n", targetRegistryURL)
@@ -280,14 +274,19 @@ func (client *RegistryClient) fetchPackageInfo(ctx context.Context, packageName,
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("registry returned status %d for %s", response.StatusCode, packageName)
 	}
+	if response.ContentLength > maxRegistryResponseSize {
+		return nil, fmt.Errorf("registry response for %s exceeds %d bytes", packageName, maxRegistryResponseSize)
+	}
 
-	body, err := io.ReadAll(response.Body)
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxRegistryResponseSize+1))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+	if len(body) > maxRegistryResponseSize {
+		return nil, fmt.Errorf("registry response for %s exceeds %d bytes", packageName, maxRegistryResponseSize)
 	}
 
 	return body, nil
 }
 
-// Ensure RegistryClient implements the interface
 var _ shared.RegistryClient = (*RegistryClient)(nil)

@@ -22,7 +22,6 @@ func ParseDependenciesWithLog(filePath string, registryType shared.RegistryType,
 	return parser.ParseDependencies(filePath, options)
 }
 
-// getParser returns the appropriate parser for the given file type
 func getParser(registryType shared.RegistryType, log shared.LogFunc) (shared.Parser, error) {
 	switch registryType {
 	case shared.NPM:
