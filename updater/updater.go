@@ -169,7 +169,10 @@ func checkOutdatedWithRegistryClient(ctx context.Context, dependencies []shared.
 
 	if cache != nil {
 		cache.CleanExpiredEntries()
-		if err := cache.SaveEntries(); err != nil {
+		if err := cache.SaveEntries(ctx); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil, fmt.Errorf("save cache: %w", err)
+			}
 			if log != nil {
 				log("Warning: Could not save cache: %v\n", err)
 			}

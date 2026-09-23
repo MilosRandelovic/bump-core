@@ -2,6 +2,7 @@ package shared
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -51,8 +52,6 @@ type Cache struct {
 	currentTime func() time.Time
 	mutex       sync.Mutex
 }
-
-var cachePersistenceMutex sync.Mutex
 
 // NewCacheWithError creates a cache and reports any initialization or load error.
 // A non-nil cache may be returned with a load error so callers can continue with
@@ -134,6 +133,13 @@ func decodeCacheEntries(data []byte) (map[string]CacheEntry, error) {
 		return make(map[string]CacheEntry), nil
 	}
 
+	var envelope struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(trimmed, &envelope); err == nil && envelope.Version != cacheFormatVersion {
+		return nil, &unsupportedCacheVersionError{version: envelope.Version}
+	}
+
 	var persisted cacheFile
 	decoder := json.NewDecoder(bytes.NewReader(trimmed))
 	decoder.DisallowUnknownFields()
@@ -159,16 +165,19 @@ func decodeCacheEntries(data []byte) (map[string]CacheEntry, error) {
 }
 
 // SaveEntries merges the in-memory entries with the persisted cache and writes them atomically.
-func (c *Cache) SaveEntries() error {
-	c.mutex.Lock()
-	defer c.mutex.Unlock()
-	cachePersistenceMutex.Lock()
-	defer cachePersistenceMutex.Unlock()
-	lockFile, err := acquireCachePersistenceLock(c.filePath)
+// Cancellation also stops a save waiting for another process's cache lock.
+func (c *Cache) SaveEntries(ctx context.Context) error {
+	lockFile, err := acquireCachePersistenceLock(ctx, c.filePath)
 	if err != nil {
 		return err
 	}
 	defer releaseCachePersistenceLock(lockFile)
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("save cache: %w", err)
+	}
 
 	mergedEntries := make(map[string]CacheEntry, len(c.entries))
 	if data, err := os.ReadFile(c.filePath); err == nil {
@@ -242,6 +251,9 @@ func (c *Cache) SaveEntries() error {
 	if err := temporaryFile.Close(); err != nil {
 		return fmt.Errorf("failed to close cache: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("save cache: %w", err)
+	}
 	if err := os.Rename(temporaryPath, c.filePath); err != nil {
 		return fmt.Errorf("failed to replace cache: %w", err)
 	}
@@ -292,16 +304,34 @@ func (c *Cache) now() time.Time {
 	return time.Now()
 }
 
-func acquireCachePersistenceLock(cachePath string) (*os.File, error) {
+func acquireCachePersistenceLock(ctx context.Context, cachePath string) (*os.File, error) {
 	lockFile, err := os.OpenFile(cachePath+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open cache lock: %w", err)
 	}
-	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+	if err := ctx.Err(); err != nil {
 		lockFile.Close()
 		return nil, fmt.Errorf("lock cache: %w", err)
 	}
-	return lockFile, nil
+
+	retry := time.NewTicker(20 * time.Millisecond)
+	defer retry.Stop()
+	for {
+		err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return lockFile, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+			lockFile.Close()
+			return nil, fmt.Errorf("lock cache: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			lockFile.Close()
+			return nil, fmt.Errorf("lock cache: %w", ctx.Err())
+		case <-retry.C:
+		}
+	}
 }
 
 func releaseCachePersistenceLock(lockFile *os.File) {
