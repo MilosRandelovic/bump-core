@@ -88,8 +88,10 @@ type UpdateParams struct {
 }
 
 // OptionsParams contains sidecar dependency options and frontend diagnostics settings.
+// Update is retained for wire compatibility; the request method owns update intent.
 type OptionsParams struct {
 	Verbose                 bool `json:"verbose"`
+	Update                  bool `json:"update"`
 	Semver                  bool `json:"semver"`
 	NoCache                 bool `json:"noCache"`
 	IncludePeerDependencies bool `json:"includePeerDependencies"`
