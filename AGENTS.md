@@ -21,7 +21,7 @@ shared/              Cross-ecosystem contracts and utilities
 
 Dependencies point from entry points to internal frontends, then to `parser` and `updater`, then to ecosystem packages and `shared`. Keep `npm` and `pub` independent, keep frontend behavior under `internal`, and move a helper to `shared` only when more than one package genuinely owns the need.
 
-Registry HTTP access belongs in the ecosystem registry clients. Dependency-file reads belong in parsers, configuration reads belong in ecosystem configuration loaders, and cache and dependency-file writes belong in `shared`.
+Registry HTTP access belongs in the ecosystem registry clients. Dependency discovery reads belong in parsers, configuration reads belong in ecosystem configuration loaders, and dependency-file prepare/apply reads and writes and cache persistence belong in `shared`.
 
 Library packages never print. Optional diagnostics use `shared.LogFunc`; the sidecar and MCP transports reserve stdout for protocol messages and may send fatal transport errors to stderr.
 
@@ -36,9 +36,9 @@ Library packages never print. Optional diagnostics use `shared.LogFunc`; the sid
 
 ## Safety invariants
 
-- `CheckOutdated` bounds registry concurrency, preserves dependency order in results and diagnostics, reports per-file and overall progress, and stops scheduling work after cancellation.
+- `CheckOutdated` runs at most six registry checks per file, preserves dependency order in results and diagnostics, reports per-file and overall progress, and stops scheduling work after cancellation.
 - Registry clients cap response bodies before decoding and never contact a live registry from tests.
-- The persistent cache is versioned strict JSON at `~/.bump-cache`. Cache keys include every input that changes a result, and minimum-age results expire when the next release becomes eligible if that occurs before the normal expiry.
+- The persistent cache is versioned strict JSON at `~/.bump-cache`. Cache keys are structured JSON, never delimiter-composed strings, and include package name, dependency type, registry, current version, constraint, and minimum-age policy when enabled. Minimum-age results expire when the next release becomes eligible if that occurs before the normal expiry.
 - Cache saves take process-local and operating-system locks, reload and merge the current file, remove expired entries, and atomically replace it with mode `0600`. Unsupported cache versions fail without being overwritten; other invalid cache data may be replaced by fresh results.
 - `updater.UpdateDependencies` locks canonical target paths across goroutines and processes for the complete prepare/apply transaction and acquires multi-file locks in deterministic order.
 - Prepare and validate every target before writing the first file. Validate the source location, original and replacement versions, and resulting constraint; changed input fails safely.
@@ -50,7 +50,7 @@ Library packages never print. Optional diagnostics use `shared.LogFunc`; the sid
 
 Each request, response, log message, and progress event occupies one JSON line. Owned JSON schemas reject unknown fields and trailing values. Request IDs are required integers; zero is valid and appears in every correlated message.
 
-The sidecar supports `detect`, `check`, `update`, and `cancel`. `check` and `update` accept one version policy and optional dependency targets. A target intersects its package name, dependency type, and file path fields; multiple targets form a union; omitted targets select all parsed dependencies; invalid or unmatched targets fail.
+The sidecar supports `detect`, `check`, `update`, and `cancel`. `check` selects one version policy and optional dependency targets. A target intersects its package name, dependency type, and file path fields; multiple targets form a union; omitted targets select all parsed dependencies; invalid or unmatched targets fail. `update` applies the supplied checked updates.
 
 Regular requests run concurrently up to the fixed limit. Additional work is rejected immediately with the machine-readable `request_limit_exceeded` code so a client can retry; cancellation stays available and does not consume a slot. Duplicate active IDs fail, and every started request has cancellation and wait ownership.
 
@@ -66,7 +66,7 @@ Keep MCP version policy and target selection identical to the sidecar. Forward t
 
 `shared.Version` is the release source of truth. Every version needs an exact `## [x.y.z]` section in `CHANGELOG.md` before merge, and major versions must follow Go module import-path rules.
 
-The release workflow runs on pushes to `main`, rejects an existing tag, builds the sidecar to read its version, creates the tag and GitHub source release, and opens a dependency-update pull request in `homebrew-bump`. It does not repeat CI tests. Workflow actions use their latest supported major tags.
+The release workflow runs on pushes to `main`, runs the product validation commands on the merged commit before creating a tag, rejects an existing tag, builds the sidecar to read its version, creates the tag and GitHub source release, and opens a dependency-update pull request in `homebrew-bump`. Workflow actions use their latest supported major tags.
 
 The Homebrew formula builds `bump-mcp` from the released module version, so the bump-core release must complete before the generated `homebrew-bump` update is merged.
 

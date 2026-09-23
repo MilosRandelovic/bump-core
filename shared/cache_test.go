@@ -3,12 +3,11 @@ package shared
 import (
 	"bytes"
 	"encoding/json"
-	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -180,32 +179,102 @@ func TestCacheRejectsInvalidJSONShapes(t *testing.T) {
 	}
 }
 
-func TestCachePersistenceLockIsCrossProcess(t *testing.T) {
-	cachePath := os.Getenv("BUMP_CACHE_LOCK_TEST_PATH")
+func TestCacheSaveEntriesLocksAcrossProcesses(t *testing.T) {
+	cachePath := os.Getenv("BUMP_CACHE_SAVE_TEST_PATH")
 	if cachePath != "" {
-		lockFile, err := os.OpenFile(cachePath+".lock", os.O_CREATE|os.O_RDWR, 0o600)
-		if err != nil {
+		entry := CacheEntry{
+			PackageName: os.Getenv("BUMP_CACHE_SAVE_TEST_NAME"), Type: "npm", Registry: "https://registry.npmjs.org",
+			Constraint: "*", AbsoluteLatest: "1.0.0", ConstraintLatest: "1.0.0", Expiry: cacheTestTime.Add(time.Hour),
+		}
+		cache := newTestCache(cachePath)
+		cache.Set(entry)
+		ready := os.NewFile(3, "ready")
+		if _, err := ready.Write([]byte{1}); err != nil {
 			t.Fatal(err)
 		}
-		defer lockFile.Close()
-		err = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
-			t.Fatalf("lock error = %v, expected lock contention", err)
+		ready.Close()
+		if err := cache.SaveEntries(); err != nil {
+			t.Fatal(err)
 		}
 		return
 	}
 
-	cachePath = filepath.Join(t.TempDir(), ".bump-cache")
+	cachePath = getTestCachePath(t)
 	lockFile, err := acquireCachePersistenceLock(cachePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer releaseCachePersistenceLock(lockFile)
+	locked := true
+	defer func() {
+		if locked {
+			releaseCachePersistenceLock(lockFile)
+		}
+	}()
 
-	command := exec.Command(os.Args[0], "-test.run=^TestCachePersistenceLockIsCrossProcess$")
-	command.Env = append(os.Environ(), "BUMP_CACHE_LOCK_TEST_PATH="+cachePath)
-	if output, err := command.CombinedOutput(); err != nil {
-		t.Fatalf("cross-process lock helper failed: %v\n%s", err, output)
+	results := make(chan error, 2)
+	for _, name := range []string{"first", "second"} {
+		readyReader, readyWriter, err := os.Pipe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		command := exec.Command(os.Args[0], "-test.run=^TestCacheSaveEntriesLocksAcrossProcesses$")
+		command.Env = append(os.Environ(), "BUMP_CACHE_SAVE_TEST_PATH="+cachePath, "BUMP_CACHE_SAVE_TEST_NAME="+name)
+		command.ExtraFiles = []*os.File{readyWriter}
+		var output bytes.Buffer
+		command.Stdout = &output
+		command.Stderr = &output
+		if err := command.Start(); err != nil {
+			readyReader.Close()
+			readyWriter.Close()
+			t.Fatal(err)
+		}
+		readyWriter.Close()
+		var signal [1]byte
+		_, readErr := readyReader.Read(signal[:])
+		readyReader.Close()
+		if readErr != nil {
+			t.Fatalf("child %s did not start saving: %v", name, readErr)
+		}
+		go func() {
+			if err := command.Wait(); err != nil {
+				results <- fmt.Errorf("child %s: %w: %s", name, err, output.String())
+				return
+			}
+			results <- nil
+		}()
+	}
+
+	select {
+	case err := <-results:
+		t.Fatalf("SaveEntries completed while another process held the cache lock: %v", err)
+	case <-time.After(500 * time.Millisecond):
+	}
+	releaseCachePersistenceLock(lockFile)
+	locked = false
+	for range 2 {
+		if err := <-results; err != nil {
+			t.Fatal(err)
+		}
+	}
+	data, err := os.ReadFile(cachePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var persisted cacheFile
+	if err := json.Unmarshal(data, &persisted); err != nil || persisted.Version != cacheFormatVersion {
+		t.Fatalf("saved cache is invalid: %v, %#v", err, persisted)
+	}
+	if len(persisted.Entries) != 2 {
+		t.Fatalf("saved entries = %#v, expected both child entries", persisted.Entries)
+	}
+	for _, name := range []string{"first", "second"} {
+		found := false
+		for _, entry := range persisted.Entries {
+			found = found || entry.PackageName == name
+		}
+		if !found {
+			t.Fatalf("missing %s entry: %#v", name, persisted.Entries)
+		}
 	}
 }
 

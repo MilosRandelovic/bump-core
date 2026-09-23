@@ -129,6 +129,49 @@ func TestServerRejectsInvalidRequestShapes(t *testing.T) {
 	}
 }
 
+func TestServerRejectsUnknownCheckUpdateAndCancelParams(t *testing.T) {
+	tests := []struct {
+		name   string
+		method RequestMethod
+		params string
+	}{
+		{"check field", RequestMethodCheck, `{"filePath":"/tmp/package.json","registryType":"npm","unexpected":true}`},
+		{"check options field", RequestMethodCheck, `{"filePath":"/tmp/package.json","registryType":"npm","options":{"unexpected":true}}`},
+		{"check target field", RequestMethodCheck, `{"filePath":"/tmp/package.json","registryType":"npm","targets":[{"name":"example","unexpected":true}]}`},
+		{"update field", RequestMethodUpdate, `{"filePath":"/tmp/package.json","registryType":"npm","outdated":[],"unexpected":true}`},
+		{"update options field", RequestMethodUpdate, `{"filePath":"/tmp/package.json","registryType":"npm","options":{"unexpected":true},"outdated":[]}`},
+		{"update dependency field", RequestMethodUpdate, `{"filePath":"/tmp/package.json","registryType":"npm","outdated":[{"name":"example","type":"dependencies","unexpected":true}]}`},
+		{"cancel field", RequestMethodCancel, `{"id":99,"unexpected":true}`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := fmt.Sprintf(`{"method":%q,"id":1,"params":%s}`+"\n", test.method, test.params)
+			messages := runProtocolInput(t, input, nil)
+			if len(messages) != 1 || messageType(t, messages[0]) != "error" || !strings.Contains(messageError(t, messages[0]), "unknown field") {
+				t.Fatalf("unexpected messages: %#v", messages)
+			}
+		})
+	}
+}
+
+func TestServerAcceptsCompatibilityUpdateOption(t *testing.T) {
+	messages := runProtocol(t, map[string]any{
+		"method": "update", "id": 1,
+		"params": map[string]any{
+			"filePath": "/tmp/package.json", "registryType": "npm",
+			"options": map[string]any{"update": true}, "outdated": []any{},
+		},
+	}, func(server *Server) {
+		server.updateDependencies = func(ctx context.Context, filePath string, outdated []shared.OutdatedDependency, registryType shared.RegistryType, options shared.Options, workingDirectory string, log shared.LogFunc) error {
+			return nil
+		}
+	})
+	if len(messages) != 1 || messageType(t, messages[0]) != "result" {
+		t.Fatalf("unexpected messages: %#v", messages)
+	}
+}
+
 func TestServerDetect(t *testing.T) {
 	directory := t.TempDir()
 	if err := os.WriteFile(filepath.Join(directory, "package.json"), []byte("{}\n"), 0o644); err != nil {
