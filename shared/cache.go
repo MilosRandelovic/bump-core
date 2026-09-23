@@ -47,10 +47,11 @@ func (e *unsupportedCacheVersionError) Error() string {
 
 // Cache stores registry lookup results and persists them between runs.
 type Cache struct {
-	entries     map[string]CacheEntry
-	filePath    string
-	currentTime func() time.Time
-	mutex       sync.Mutex
+	entries       map[string]CacheEntry
+	filePath      string
+	currentTime   func() time.Time
+	mutex         sync.Mutex
+	onLockBlocked func()
 }
 
 // NewCacheWithError creates a cache and reports any initialization or load error.
@@ -167,7 +168,7 @@ func decodeCacheEntries(data []byte) (map[string]CacheEntry, error) {
 // SaveEntries merges the in-memory entries with the persisted cache and writes them atomically.
 // Cancellation also stops a save waiting for another process's cache lock.
 func (c *Cache) SaveEntries(ctx context.Context) error {
-	lockFile, err := acquireCachePersistenceLock(ctx, c.filePath)
+	lockFile, err := acquireCachePersistenceLock(ctx, c.filePath, c.onLockBlocked)
 	if err != nil {
 		return err
 	}
@@ -304,7 +305,7 @@ func (c *Cache) now() time.Time {
 	return time.Now()
 }
 
-func acquireCachePersistenceLock(ctx context.Context, cachePath string) (*os.File, error) {
+func acquireCachePersistenceLock(ctx context.Context, cachePath string, onBlocked func()) (*os.File, error) {
 	lockFile, err := os.OpenFile(cachePath+".lock", os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open cache lock: %w", err)
@@ -324,6 +325,10 @@ func acquireCachePersistenceLock(ctx context.Context, cachePath string) (*os.Fil
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
 			lockFile.Close()
 			return nil, fmt.Errorf("lock cache: %w", err)
+		}
+		if onBlocked != nil {
+			onBlocked()
+			onBlocked = nil
 		}
 		select {
 		case <-ctx.Done():

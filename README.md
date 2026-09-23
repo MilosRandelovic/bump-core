@@ -2,7 +2,9 @@
 
 Core library and sidecar binary for the [Bump](https://github.com/MilosRandelovic/homebrew-bump) dependency update tool. Contains all business logic for checking and updating dependencies in `package.json` (npm) and `pubspec.yaml` (Dart/Flutter pub) projects.
 
-## Installation
+## Add as a Go library dependency
+
+Run this in the consuming Go module:
 
 ```sh
 go get github.com/MilosRandelovic/bump-core/v2@latest
@@ -17,23 +19,34 @@ bump-core packages are importable by other Go modules:
 ```go
 import (
 	"context"
+	"fmt"
 
 	"github.com/MilosRandelovic/bump-core/v2/parser"
 	"github.com/MilosRandelovic/bump-core/v2/shared"
 	"github.com/MilosRandelovic/bump-core/v2/updater"
 )
 
-directory := "."
-filePath, registryType, err := parser.AutoDetectDependencyFile(directory, nil)
+func checkAndUpdate(ctx context.Context, directory string) error {
+	filePath, registryType, err := parser.AutoDetectDependencyFile(directory, nil)
+	if err != nil {
+		return fmt.Errorf("detect dependency file: %w", err)
+	}
 
-options := shared.Options{}
+	options := shared.Options{}
+	dependencies, err := parser.ParseDependencies(filePath, registryType, options)
+	if err != nil {
+		return fmt.Errorf("parse dependencies: %w", err)
+	}
 
-dependencies, err := parser.ParseDependencies(filePath, registryType, options)
-
-// Check for outdated dependencies (empty workingDirectory is derived from dependency paths, then falls back to the process CWD)
-result, err := updater.CheckOutdated(context.Background(), dependencies, registryType, options, "", nil, nil)
-
-err = updater.UpdateDependencies(context.Background(), filePath, result.Outdated, registryType, options, "", nil)
+	result, err := updater.CheckOutdated(ctx, dependencies, registryType, options, directory, nil, nil)
+	if err != nil {
+		return fmt.Errorf("check outdated dependencies: %w", err)
+	}
+	if err := updater.UpdateDependencies(ctx, filePath, result.Outdated, registryType, options, directory, nil); err != nil {
+		return fmt.Errorf("update dependencies: %w", err)
+	}
+	return nil
+}
 ```
 
 ### As a sidecar binary

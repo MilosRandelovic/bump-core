@@ -118,6 +118,11 @@ func (s *Server) Run() error {
 		}
 		if incoming.ID == nil {
 			s.sendError(0, "request id is required")
+			if err := s.currentWriteError(); err != nil {
+				s.cancelAllRequests()
+				s.requestWorkers.Wait()
+				return err
+			}
 			continue
 		}
 		request := Request{Method: incoming.Method, ID: *incoming.ID, Params: incoming.Params}

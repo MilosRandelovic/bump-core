@@ -39,7 +39,7 @@ Library packages never print. Optional diagnostics use `shared.LogFunc`; the sid
 - `CheckOutdated` runs at most six registry checks per file, preserves dependency order in results and diagnostics, reports per-file and overall progress, and stops scheduling work after cancellation.
 - Registry clients cap response bodies before decoding and never contact a live registry from tests.
 - The persistent cache is versioned strict JSON at `~/.bump-cache`. Cache keys are structured JSON, never delimiter-composed strings, and include package name, dependency type, registry, current version, constraint, and minimum-age policy when enabled. Minimum-age results expire when the next release becomes eligible if that occurs before the normal expiry.
-- Cache saves take process-local and operating-system locks, reload and merge the current file, remove expired entries, and atomically replace it with mode `0600`. Unsupported cache versions fail without being overwritten; other invalid cache data may be replaced by fresh results.
+- Cache saves take process-local and operating-system locks, observe request cancellation while waiting for the operating-system lock, reload and merge the current file, remove expired entries, and atomically replace it with mode `0600`. Unsupported cache versions fail without being overwritten; other invalid cache data may be replaced by fresh results.
 - `updater.UpdateDependencies` locks canonical target paths across goroutines and processes for the complete prepare/apply transaction and acquires multi-file locks in deterministic order.
 - Prepare and validate every target before writing the first file. Validate the source location, original and replacement versions, and resulting constraint; changed input fails safely.
 - Each file replacement is atomic and preserves symlink targets, permissions, and unrelated content. Hard-linked files are rejected because atomic replacement cannot preserve their topology.
@@ -52,7 +52,7 @@ Each request, response, log message, and progress event occupies one JSON line. 
 
 The sidecar supports `detect`, `check`, `update`, and `cancel`. `check` selects one version policy and optional dependency targets. A target intersects its package name, dependency type, and file path fields; multiple targets form a union; omitted targets select all parsed dependencies; invalid or unmatched targets fail. `update` applies the supplied checked updates.
 
-Regular requests run concurrently up to the fixed limit. Additional work is rejected immediately with the machine-readable `request_limit_exceeded` code so a client can retry; cancellation stays available and does not consume a slot. Duplicate active IDs fail, and every started request has cancellation and wait ownership.
+Regular requests run concurrently up to an exact limit of eight. Additional work is rejected immediately with the machine-readable `request_limit_exceeded` code so a client can retry; cancellation stays available and does not consume a slot. Duplicate active IDs fail, and every started request has cancellation and wait ownership. The encoder serializes all response, log, and progress writes so concurrent requests cannot interleave JSON lines. Check cancellation before starting registry work and before dependency-update prepare/apply operations so canceled requests stop before new work begins.
 
 ## MCP contract
 

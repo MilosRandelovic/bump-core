@@ -2,7 +2,6 @@
 
 ## [2.2.1]
 
-- Prevent malformed sidecar and cache input from being silently accepted, oversized registry responses from being decoded, and concurrent cache saves from losing entries
 - Reject unknown and malformed sidecar and cache fields and require request IDs explicitly
 - Bound npm and Pub registry response bodies
 - Serialize cache persistence across processes and make cache expiry tests deterministic

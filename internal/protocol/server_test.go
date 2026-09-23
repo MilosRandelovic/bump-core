@@ -345,9 +345,11 @@ func TestServerRejectsUnknownDependencyType(t *testing.T) {
 }
 
 func TestServerReturnsOutputErrors(t *testing.T) {
-	server := NewServerWithIO(strings.NewReader("not-json\n"), failingWriter{})
-	if err := server.Run(); err == nil || !strings.Contains(err.Error(), "write failed") {
-		t.Fatalf("Run() error = %v, expected output failure", err)
+	for _, input := range []string{"not-json\n", `{"method":"detect","params":{}}` + "\n"} {
+		server := NewServerWithIO(strings.NewReader(input), failingWriter{})
+		if err := server.Run(); err == nil || !strings.Contains(err.Error(), "write failed") {
+			t.Fatalf("Run() with input %q error = %v, expected output failure", input, err)
+		}
 	}
 }
 
