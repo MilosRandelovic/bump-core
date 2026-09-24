@@ -32,9 +32,9 @@ func TestFilterVersionsByMinimumReleaseAge(t *testing.T) {
 
 func TestGenerateCacheKeyUsesOnlyCacheRelevantOptions(t *testing.T) {
 	unfiltered := GenerateCacheKey("example", "npm", "https://registry.npmjs.org", "", "*", Options{})
-	unfilteredVerbose := GenerateCacheKey("example", "npm", "https://registry.npmjs.org", "", "*", Options{Verbose: true})
+	unfilteredSemver := GenerateCacheKey("example", "npm", "https://registry.npmjs.org", "", "*", Options{Semver: true})
 	filtered := GenerateCacheKey("example", "npm", "https://registry.npmjs.org", "", "*", Options{EnforceMinimumReleaseAge: true})
-	if unfiltered != unfilteredVerbose {
+	if unfiltered != unfilteredSemver {
 		t.Fatal("options unrelated to registry results must not change cache keys")
 	}
 	if unfiltered == filtered {

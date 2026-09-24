@@ -38,7 +38,6 @@ func lockDependencyFiles(ctx context.Context, paths []string) (func(), error) {
 		uniquePaths[filepath.Clean(canonicalPath)] = struct{}{}
 	}
 
-	// Sorting canonical paths prevents multi-file deadlocks across goroutines and processes.
 	keys := make([]string, 0, len(uniquePaths))
 	for path := range uniquePaths {
 		keys = append(keys, path)

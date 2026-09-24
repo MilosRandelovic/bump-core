@@ -2,13 +2,16 @@ package shared
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -44,22 +47,22 @@ func (e *unsupportedCacheVersionError) Error() string {
 
 // Cache stores registry lookup results and persists them between runs.
 type Cache struct {
-	entries  map[string]CacheEntry
-	filePath string
-	mutex    sync.Mutex
+	entries       map[string]CacheEntry
+	filePath      string
+	currentTime   func() time.Time
+	mutex         sync.Mutex
+	onLockBlocked func()
 }
-
-var cachePersistenceMutex sync.Mutex
 
 // NewCacheWithError creates a cache and reports any initialization or load error.
 // A non-nil cache may be returned with a load error so callers can continue with
 // an empty cache and surface the warning to users.
 func NewCacheWithError() (*Cache, error) {
-	homeDir, err := os.UserHomeDir()
+	homeDirectory, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve home directory: %w", err)
 	}
-	filePath := filepath.Join(homeDir, ".bump-cache")
+	filePath := filepath.Join(homeDirectory, ".bump-cache")
 
 	cache := &Cache{
 		entries:  make(map[string]CacheEntry),
@@ -75,12 +78,12 @@ func NewCacheWithError() (*Cache, error) {
 
 // GenerateCacheKey returns the stable identity for one registry lookup.
 // Only options that change the result, currently minimum-age filtering, affect the key.
-func GenerateCacheKey(packageName, packageType, registry, current, constraint string, options Options) string {
+func GenerateCacheKey(packageName, ecosystem, registryURL, currentVersion, constraint string, options Options) string {
 	return cacheKeyForEntry(CacheEntry{
 		PackageName:    packageName,
-		Type:           packageType,
-		Registry:       registry,
-		CurrentVersion: current,
+		Type:           ecosystem,
+		Registry:       registryURL,
+		CurrentVersion: currentVersion,
 		Constraint:     constraint,
 		MinimumAge:     options.EnforceMinimumReleaseAge,
 	})
@@ -131,8 +134,23 @@ func decodeCacheEntries(data []byte) (map[string]CacheEntry, error) {
 		return make(map[string]CacheEntry), nil
 	}
 
+	var envelope struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(trimmed, &envelope); err == nil && envelope.Version != cacheFormatVersion {
+		return nil, &unsupportedCacheVersionError{version: envelope.Version}
+	}
+
 	var persisted cacheFile
-	if err := json.Unmarshal(trimmed, &persisted); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&persisted); err != nil {
+		return nil, fmt.Errorf("failed to decode cache: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return nil, fmt.Errorf("failed to decode cache: multiple JSON values")
+		}
 		return nil, fmt.Errorf("failed to decode cache: %w", err)
 	}
 	if persisted.Version != cacheFormatVersion {
@@ -148,13 +166,20 @@ func decodeCacheEntries(data []byte) (map[string]CacheEntry, error) {
 }
 
 // SaveEntries merges the in-memory entries with the persisted cache and writes them atomically.
-func (c *Cache) SaveEntries() error {
+// Cancellation also stops a save waiting for another process's cache lock.
+func (c *Cache) SaveEntries(ctx context.Context) error {
+	lockFile, err := acquireCachePersistenceLock(ctx, c.filePath, c.onLockBlocked)
+	if err != nil {
+		return err
+	}
+	defer releaseCachePersistenceLock(lockFile)
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
-	cachePersistenceMutex.Lock()
-	defer cachePersistenceMutex.Unlock()
 
-	// Reloading under the persistence lock prevents concurrent cache instances from overwriting one another's entries.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("save cache: %w", err)
+	}
+
 	mergedEntries := make(map[string]CacheEntry, len(c.entries))
 	if data, err := os.ReadFile(c.filePath); err == nil {
 		diskEntries, decodeErr := decodeCacheEntries(data)
@@ -177,7 +202,7 @@ func (c *Cache) SaveEntries() error {
 			mergedEntries[key] = entry
 		}
 	}
-	now := time.Now()
+	now := c.now()
 	for key, entry := range mergedEntries {
 		if now.After(entry.Expiry) {
 			delete(mergedEntries, key)
@@ -227,6 +252,9 @@ func (c *Cache) SaveEntries() error {
 	if err := temporaryFile.Close(); err != nil {
 		return fmt.Errorf("failed to close cache: %w", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("save cache: %w", err)
+	}
 	if err := os.Rename(temporaryPath, c.filePath); err != nil {
 		return fmt.Errorf("failed to replace cache: %w", err)
 	}
@@ -242,7 +270,7 @@ func (c *Cache) Get(key string) (CacheEntry, bool) {
 	if !ok {
 		return CacheEntry{}, false
 	}
-	if time.Now().After(entry.Expiry) {
+	if c.now().After(entry.Expiry) {
 		delete(c.entries, key)
 		return CacheEntry{}, false
 	}
@@ -262,10 +290,56 @@ func (c *Cache) CleanExpiredEntries() {
 	c.mutex.Lock()
 	defer c.mutex.Unlock()
 
-	now := time.Now()
+	now := c.now()
 	for key, entry := range c.entries {
 		if now.After(entry.Expiry) {
 			delete(c.entries, key)
 		}
 	}
+}
+
+func (c *Cache) now() time.Time {
+	if c.currentTime != nil {
+		return c.currentTime()
+	}
+	return time.Now()
+}
+
+func acquireCachePersistenceLock(ctx context.Context, cachePath string, onBlocked func()) (*os.File, error) {
+	lockFile, err := os.OpenFile(cachePath+".lock", os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open cache lock: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		lockFile.Close()
+		return nil, fmt.Errorf("lock cache: %w", err)
+	}
+
+	retry := time.NewTicker(20 * time.Millisecond)
+	defer retry.Stop()
+	for {
+		err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			return lockFile, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+			lockFile.Close()
+			return nil, fmt.Errorf("lock cache: %w", err)
+		}
+		if onBlocked != nil {
+			onBlocked()
+			onBlocked = nil
+		}
+		select {
+		case <-ctx.Done():
+			lockFile.Close()
+			return nil, fmt.Errorf("lock cache: %w", ctx.Err())
+		case <-retry.C:
+		}
+	}
+}
+
+func releaseCachePersistenceLock(lockFile *os.File) {
+	_ = syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+	_ = lockFile.Close()
 }

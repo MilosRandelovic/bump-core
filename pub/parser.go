@@ -8,8 +8,9 @@ import (
 	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
 
-// Parser handles Dart pubspec.yaml parsing
+// Parser reads dependencies from Dart pubspec.yaml files.
 type Parser struct {
+	// Log receives optional parsing diagnostics.
 	Log shared.LogFunc
 }
 
@@ -35,7 +36,6 @@ func (parser *Parser) ParseDependencies(filePath string, options shared.Options)
 	lines := strings.Split(string(data), "\n")
 	var dependencies []shared.Dependency
 
-	// Track which section we're in
 	var currentSection shared.DependencyType
 	var inSection bool
 	var currentPackage *packageInfo
@@ -68,7 +68,6 @@ func (parser *Parser) ParseDependencies(filePath string, options shared.Options)
 		indent := getIndentation(line)
 		sectionLine := strings.TrimSpace(stripInlineComment(trimmedLine))
 
-		// Check if we're entering a dependency section
 		if sectionLine == "dependencies:" {
 			finalizeSection()
 			currentSection = shared.Dependencies
@@ -140,7 +139,6 @@ func (parser *Parser) ParseDependencies(filePath string, options shared.Options)
 	return dependencies, nil
 }
 
-// packageInfo holds information about a package being parsed
 type packageInfo struct {
 	name              string
 	version           string
@@ -151,10 +149,7 @@ type packageInfo struct {
 	versionLineNumber int
 }
 
-// toDependency converts packageInfo to shared.Dependency if it should be included
 func (info *packageInfo) toDependency(section shared.DependencyType, filePath string) *shared.Dependency {
-
-	// Skip SDK dependencies
 	if info.sdk != "" {
 		return nil
 	}
@@ -163,7 +158,6 @@ func (info *packageInfo) toDependency(section shared.DependencyType, filePath st
 		return nil
 	}
 
-	// Use version line number if available, otherwise use package line number
 	effectiveLineNumber := info.lineNumber
 	if info.versionLineNumber > 0 {
 		effectiveLineNumber = info.versionLineNumber
@@ -180,7 +174,6 @@ func (info *packageInfo) toDependency(section shared.DependencyType, filePath st
 		Version: shared.CleanVersion(info.version),
 	}
 
-	// Set hosted URL for non-pub.dev hosted packages
 	if info.hostedURL != "" && !strings.Contains(info.hostedURL, "pub.dev") {
 		dependency.HostedURL = info.hostedURL
 	}
@@ -188,14 +181,13 @@ func (info *packageInfo) toDependency(section shared.DependencyType, filePath st
 	return dependency
 }
 
-// cleanQuotes removes surrounding quotes from a string
-func cleanQuotes(s string) string {
-	s = strings.TrimSpace(stripInlineComment(s))
-	if (strings.HasPrefix(s, `"`) && strings.HasSuffix(s, `"`)) ||
-		(strings.HasPrefix(s, `'`) && strings.HasSuffix(s, `'`)) {
-		return s[1 : len(s)-1]
+func cleanQuotes(value string) string {
+	value = strings.TrimSpace(stripInlineComment(value))
+	if (strings.HasPrefix(value, `"`) && strings.HasSuffix(value, `"`)) ||
+		(strings.HasPrefix(value, `'`) && strings.HasSuffix(value, `'`)) {
+		return value[1 : len(value)-1]
 	}
-	return s
+	return value
 }
 
 func stripInlineComment(value string) string {
@@ -235,19 +227,15 @@ func getIndentation(line string) int {
 	return indent
 }
 
-// shouldIncludeDependency checks if a dependency should be included
 func shouldIncludeDependency(name, version string) bool {
-	// Skip flutter SDK dependency
 	if name == "flutter" {
 		return false
 	}
 
-	// Skip if no version
 	if version == "" {
 		return false
 	}
 
-	// Skip 'any' versions, SDK dependencies, path, git dependencies
 	if version == "any" || strings.HasPrefix(version, "sdk:") || strings.HasPrefix(version, "path:") || strings.HasPrefix(version, "git:") {
 		return false
 	}
@@ -255,5 +243,4 @@ func shouldIncludeDependency(name, version string) bool {
 	return true
 }
 
-// Ensure Parser implements the interface
 var _ shared.Parser = (*Parser)(nil)

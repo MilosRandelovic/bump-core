@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -291,6 +292,50 @@ func TestRegistryClientRejectsEmptyLatestVersion(t *testing.T) {
 	latest, err := client.GetLatestVersionFromRegistry(context.Background(), "example", server.URL, shared.Options{}, nil)
 	if err == nil || latest != "" || !strings.Contains(err.Error(), "no latest version") {
 		t.Fatalf("latest = %q, error = %v", latest, err)
+	}
+}
+
+func TestRegistryClientRejectsOversizedResponse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Length", fmt.Sprint(maxRegistryResponseSize+1))
+		response.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	client := NewRegistryClient()
+	_, err := client.fetchPackageInfo(context.Background(), "example", registryConfig{URL: server.URL})
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized response error = %v", err)
+	}
+}
+
+type registryRoundTripFunc func(request *http.Request) (*http.Response, error)
+
+func (roundTrip registryRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return roundTrip(request)
+}
+
+type errorAfterRegistryLimitReader struct{}
+
+func (errorAfterRegistryLimitReader) Read(data []byte) (int, error) {
+	return 0, errors.New("read past response cap")
+}
+
+func TestRegistryClientRejectsOversizedStreamWithoutContentLength(t *testing.T) {
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = registryRoundTripFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode:    http.StatusOK,
+			Body:          io.NopCloser(io.MultiReader(strings.NewReader(strings.Repeat("x", maxRegistryResponseSize+1)), errorAfterRegistryLimitReader{})),
+			ContentLength: -1,
+		}, nil
+	})
+	defer func() { http.DefaultTransport = previousTransport }()
+
+	client := NewRegistryClient()
+	_, err := client.fetchPackageInfo(context.Background(), "example", registryConfig{URL: "https://registry.example.test"})
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("exceeds %d bytes", maxRegistryResponseSize)) {
+		t.Fatalf("oversized streamed response error = %v", err)
 	}
 }
 

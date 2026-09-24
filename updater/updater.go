@@ -15,7 +15,6 @@ import (
 	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
 
-// checkResult accumulates results from checking individual dependencies
 type checkResult struct {
 	outdated      []shared.OutdatedDependency
 	errors        []shared.DependencyError
@@ -39,7 +38,6 @@ type indexedDependency struct {
 // It honors context cancellation, reports per-file and overall progress, derives workingDirectory when empty, and persists cache unless disabled.
 func CheckOutdated(ctx context.Context, dependencies []shared.Dependency, registryType shared.RegistryType, options shared.Options, workingDirectory string, progressCallback shared.ProgressFunc, log shared.LogFunc) (*shared.CheckResult, error) {
 
-	// Validate options against the registry's rules before doing any work
 	if err := ValidateOptions(registryType, options); err != nil {
 		return nil, err
 	}
@@ -49,7 +47,6 @@ func CheckOutdated(ctx context.Context, dependencies []shared.Dependency, regist
 		return nil, err
 	}
 
-	// Initialize cache if not disabled
 	var cache *shared.Cache
 	if !options.NoCache {
 		var cacheErr error
@@ -170,10 +167,12 @@ func checkOutdatedWithRegistryClient(ctx context.Context, dependencies []shared.
 		result.semverSkipped = append(result.semverSkipped, output.result.semverSkipped...)
 	}
 
-	// Save cache if it was used
 	if cache != nil {
 		cache.CleanExpiredEntries()
-		if err := cache.SaveEntries(); err != nil {
+		if err := cache.SaveEntries(ctx); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil, fmt.Errorf("save cache: %w", err)
+			}
 			if log != nil {
 				log("Warning: Could not save cache: %v\n", err)
 			}
@@ -256,10 +255,7 @@ func checkFileDependencies(ctx context.Context, dependencies []indexedDependency
 	return outputs, nil
 }
 
-// checkSingleDependency checks a single dependency for updates and appends results
 func checkSingleDependency(ctx context.Context, dependency shared.Dependency, registryClient shared.RegistryClient, options shared.Options, cache *shared.Cache, result *checkResult, log shared.LogFunc) {
-
-	// Skip complex dependencies (git, path, workspace, etc.)
 	if isNonRegistryDependency(dependency) {
 		if log != nil {
 			log("Skipping complex dependency: %s (%s)\n", dependency.Name, dependency.Version)
@@ -267,7 +263,6 @@ func checkSingleDependency(ctx context.Context, dependency shared.Dependency, re
 		return
 	}
 
-	// If semver flag is enabled and it's a hardcoded version (no prefix), skip it
 	if options.Semver && shared.GetVersionPrefix(dependency.OriginalVersion) == "" {
 		if log != nil {
 			log("Skipping hardcoded version: %s (%s)\n", dependency.Name, dependency.OriginalVersion)
@@ -292,7 +287,6 @@ func checkSingleDependency(ctx context.Context, dependency shared.Dependency, re
 			return
 		}
 
-		// If constraint error, use the absolute latest already returned for semver skipped
 		if errors.Is(err, shared.ErrNoVersionsSatisfyConstraint) && absoluteLatest != "" && isNewerVersion(dependency.Version, absoluteLatest) {
 			result.semverSkipped = append(result.semverSkipped, shared.SemverSkipped{
 				OutdatedDependency: shared.OutdatedDependency{
@@ -305,7 +299,6 @@ func checkSingleDependency(ctx context.Context, dependency shared.Dependency, re
 			return
 		}
 
-		// If constraint error for hardcoded pre-release, treat as up-to-date
 		if errors.Is(err, shared.ErrNoVersionsSatisfyConstraint) {
 			if log != nil {
 				log("No newer versions found for pre-release: %s (%s)\n", dependency.Name, dependency.OriginalVersion)
@@ -324,7 +317,6 @@ func checkSingleDependency(ctx context.Context, dependency shared.Dependency, re
 
 	currentVersion := dependency.Version
 
-	// Check if there's an update available
 	if constraintLatest != "" && isNewerVersion(currentVersion, constraintLatest) {
 		result.outdated = append(result.outdated, shared.OutdatedDependency{
 			BaseDependency: dependency.BaseDependency,
@@ -333,7 +325,6 @@ func checkSingleDependency(ctx context.Context, dependency shared.Dependency, re
 		})
 	}
 
-	// Add to semverSkipped if the absolute latest differs from the constraint-compatible latest
 	if absoluteLatest != constraintLatest && absoluteLatest != "" && isNewerVersion(currentVersion, absoluteLatest) {
 		result.semverSkipped = append(result.semverSkipped, shared.SemverSkipped{
 			OutdatedDependency: shared.OutdatedDependency{
@@ -365,21 +356,16 @@ func isNonRegistryDependency(dependency shared.Dependency) bool {
 	return false
 }
 
-// fetchLatestVersions determines the appropriate strategy and fetches version info
 func fetchLatestVersions(ctx context.Context, dependency shared.Dependency, registryClient shared.RegistryClient, options shared.Options, cache *shared.Cache) (absoluteLatest, constraintLatest string, err error) {
-
-	// If semver flag is enabled and we have a prefixed version, get both versions in one call
 	if options.Semver && shared.HasSemanticPrefix(dependency.OriginalVersion) {
 		return registryClient.GetBothLatestVersions(ctx, dependency.Name, dependency.OriginalVersion, dependency.HostedURL, options, cache)
 	}
 
-	// Check if current version is pre-release to determine which method to use
 	currentSemver, parseErr := semver.NewVersion(dependency.Version)
 	if parseErr == nil && currentSemver.Prerelease() != "" {
 		return registryClient.GetBothLatestVersions(ctx, dependency.Name, dependency.OriginalVersion, dependency.HostedURL, options, cache)
 	}
 
-	// Use absolute latest version fetching for stable versions (non-semver cases)
 	latest, err := registryClient.GetLatestVersionFromRegistry(ctx, dependency.Name, dependency.HostedURL, options, cache)
 	if err != nil {
 		return "", "", err
@@ -418,14 +404,12 @@ func UpdateDependencies(ctx context.Context, filePath string, outdated []shared.
 		return err
 	}
 
-	// Validate options before updating
 	if err := updater.ValidateOptions(options); err != nil {
 		return err
 	}
 
 	patternProvider := updater.GetPatternProvider()
 
-	// Sort file paths for deterministic ordering
 	filePaths := make([]string, 0, len(byFile))
 	for path := range byFile {
 		filePaths = append(filePaths, path)
@@ -491,7 +475,6 @@ func UpdateDependencies(ctx context.Context, filePath string, outdated []shared.
 	return nil
 }
 
-// getRegistryClient returns the appropriate registry client for the given registry type
 func getRegistryClient(registryType shared.RegistryType, workingDirectory string, log shared.LogFunc) (shared.RegistryClient, error) {
 	switch registryType {
 	case shared.NPM:
@@ -518,7 +501,6 @@ func ValidateOptions(registryType shared.RegistryType, options shared.Options) e
 	return registryUpdater.ValidateOptions(options)
 }
 
-// getUpdater returns the appropriate updater for the given registry type
 func getUpdater(registryType shared.RegistryType) (shared.Updater, error) {
 	switch registryType {
 	case shared.NPM:
