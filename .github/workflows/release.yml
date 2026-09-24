@@ -33,18 +33,6 @@ jobs:
     - name: Install dependencies
       run: go mod download
 
-    - name: Check Go formatting
-      run: test -z "$(gofmt -l .)"
-
-    - name: Vet Go packages
-      run: go vet ./...
-
-    - name: Test Go packages
-      run: go test ./...
-
-    - name: Race test Go packages
-      run: go test -race ./...
-
     - name: Build sidecar binary
       run: make build
 

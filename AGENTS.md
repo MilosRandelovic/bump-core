@@ -66,7 +66,7 @@ Keep MCP version policy and target selection identical to the sidecar. Forward t
 
 `shared.Version` is the release source of truth. Every version needs an exact `## [x.y.z]` section in `CHANGELOG.md` before merge, and major versions must follow Go module import-path rules.
 
-The release workflow runs on pushes to `main`, runs the product validation commands on the merged commit before creating a tag, rejects an existing tag, builds the sidecar to read its version, creates the tag and GitHub source release, and opens a dependency-update pull request in `homebrew-bump`. Workflow actions use their latest supported major tags.
+The release workflow runs on pushes to `main` and does not repeat formatting, vet, or tests because required, up-to-date PR CI has already checked the merged tree. It builds the sidecar to read its version, rejects an existing tag, creates the tag and GitHub source release, and opens a dependency-update pull request in `homebrew-bump`. Workflow actions use their latest supported major tags.
 
 The Homebrew formula builds `bump-mcp` from the released module version, so the bump-core release must complete before the generated `homebrew-bump` update is merged.
 
