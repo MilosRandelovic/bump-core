@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
@@ -23,6 +24,8 @@ type concurrentLogRegistry struct {
 	maxActive          atomic.Int32
 	concurrentStarted  chan struct{}
 	releaseConcurrency sync.Once
+	waitForLater       chan struct{}
+	completed          chan string
 }
 
 func TestValidateOptionsRejectsUnsupportedRegistry(t *testing.T) {
@@ -70,6 +73,16 @@ func (registry *concurrentLogRegistry) GetLatestVersionFromRegistry(ctx context.
 	}
 	if log := shared.LogFromContext(ctx); log != nil {
 		log("registry detail: %s\n", packageName)
+	}
+	if packageName == "package-0" && registry.waitForLater != nil {
+		select {
+		case <-registry.waitForLater:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	if registry.completed != nil {
+		registry.completed <- packageName
 	}
 	return "2.0.0", nil
 }
@@ -635,7 +648,7 @@ func TestUpdateDependenciesHonoursCancellationBeforeWriting(t *testing.T) {
 }
 
 func TestVerboseChecksStayConcurrentAndFlushLogsInDependencyOrder(t *testing.T) {
-	dependencies := make([]shared.Dependency, 6)
+	dependencies := make([]shared.Dependency, 2)
 	for index := range dependencies {
 		name := fmt.Sprintf("package-%d", index)
 		dependencies[index] = shared.Dependency{
@@ -643,10 +656,19 @@ func TestVerboseChecksStayConcurrentAndFlushLogsInDependencyOrder(t *testing.T) 
 			Version:        "1.0.0",
 		}
 	}
-	registry := &concurrentLogRegistry{concurrentStarted: make(chan struct{})}
+	registry := &concurrentLogRegistry{concurrentStarted: make(chan struct{}), waitForLater: make(chan struct{}), completed: make(chan string, len(dependencies))}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var completionOrder []string
 	var logs strings.Builder
 	result, err := checkOutdatedWithRegistryClient(
-		context.Background(), dependencies, registry, shared.Options{}, "/project", nil,
+		ctx, dependencies, registry, shared.Options{}, "/project", func(progress shared.Progress) {
+			name := <-registry.completed
+			completionOrder = append(completionOrder, name)
+			if name == "package-1" {
+				close(registry.waitForLater)
+			}
+		},
 		func(format string, args ...any) { fmt.Fprintf(&logs, format, args...) }, nil,
 	)
 	if err != nil {
@@ -657,6 +679,14 @@ func TestVerboseChecksStayConcurrentAndFlushLogsInDependencyOrder(t *testing.T) 
 	}
 	if registry.maxActive.Load() < 2 {
 		t.Fatalf("maximum concurrent checks = %d", registry.maxActive.Load())
+	}
+	if !reflect.DeepEqual(completionOrder, []string{"package-1", "package-0"}) {
+		t.Fatalf("completion order = %#v", completionOrder)
+	}
+	for index, dependency := range result.Outdated {
+		if dependency.Name != dependencies[index].Name {
+			t.Fatalf("outdated order = %#v", result.Outdated)
+		}
 	}
 	previousPosition := -1
 	for index := range dependencies {

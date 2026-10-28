@@ -22,18 +22,83 @@ func getTestCachePath(t *testing.T) string {
 	return filepath.Join(t.TempDir(), ".bump-cache")
 }
 
-func newTestCache(cachePath string) *Cache {
-	return &Cache{
-		entries:     make(map[string]CacheEntry),
-		filePath:    cachePath,
-		currentTime: func() time.Time { return cacheTestTime },
+func newTestCache(t *testing.T, cachePath string) *Cache {
+	t.Helper()
+	cache, err := NewCacheWithError(CacheConfig{FilePath: cachePath, CurrentTime: func() time.Time { return cacheTestTime }})
+	if err != nil {
+		t.Fatalf("NewCacheWithError() error = %v", err)
+	}
+	return cache
+}
+
+func TestNewCacheWithErrorRequiresPathAndClockAndLoadsFiles(t *testing.T) {
+	clock := func() time.Time { return cacheTestTime }
+	if cache, err := NewCacheWithError(CacheConfig{CurrentTime: clock}); cache != nil || err == nil || !strings.Contains(err.Error(), "cache file path is required") {
+		t.Fatalf("missing path = (%v, %v)", cache, err)
+	}
+	path := getTestCachePath(t)
+	if cache, err := NewCacheWithError(CacheConfig{FilePath: path}); cache != nil || err == nil || !strings.Contains(err.Error(), "cache clock is required") {
+		t.Fatalf("missing clock = (%v, %v)", cache, err)
+	}
+	cache := newTestCache(t, path)
+	if len(cache.entries) != 0 {
+		t.Fatalf("missing file loaded entries: %#v", cache.entries)
+	}
+	entry := CacheEntry{PackageName: "existing", Type: "npm", Constraint: "*", Expiry: cacheTestTime.Add(time.Hour)}
+	data, err := json.Marshal(cacheFile{Version: cacheFormatVersion, Entries: []CacheEntry{entry}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded := newTestCache(t, path)
+	key := GenerateCacheKey(entry.PackageName, entry.Type, entry.Registry, entry.CurrentVersion, entry.Constraint, Options{})
+	if _, ok := loaded.Get(key); !ok {
+		t.Fatal("existing valid file was not loaded")
+	}
+}
+
+func TestCacheSaveEntriesHonoursCancellationBeforeRename(t *testing.T) {
+	for _, existing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("existing=%t", existing), func(t *testing.T) {
+			path := getTestCachePath(t)
+			var original []byte
+			if existing {
+				original = []byte(`{"version":1,"entries":[]}`)
+				if err := os.WriteFile(path, original, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			cache, err := NewCacheWithError(CacheConfig{FilePath: path, CurrentTime: func() time.Time {
+				cancel()
+				return cacheTestTime
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cache.Set(CacheEntry{PackageName: "new", Type: "npm", Constraint: "*", Expiry: cacheTestTime.Add(time.Hour)})
+			if err := cache.SaveEntries(ctx); !errors.Is(err, context.Canceled) {
+				t.Fatalf("SaveEntries() error = %v, expected cancellation", err)
+			}
+			data, err := os.ReadFile(path)
+			if existing {
+				if err != nil || !bytes.Equal(data, original) {
+					t.Fatalf("cancelled save changed persisted bytes: %q, %v", data, err)
+				}
+			} else if !os.IsNotExist(err) {
+				t.Fatalf("cancelled save created cache: %q, %v", data, err)
+			}
+		})
 	}
 }
 
 func TestCachePersistsCompoundConstraintAsJSON(t *testing.T) {
 	cachePath := getTestCachePath(t)
 
-	cache := newTestCache(cachePath)
+	cache := newTestCache(t, cachePath)
 	entry := CacheEntry{
 		PackageName:      "compound-package",
 		Type:             "npm",
@@ -60,7 +125,7 @@ func TestCachePersistsCompoundConstraintAsJSON(t *testing.T) {
 		t.Fatalf("cache version = %d, expected %d", persisted.Version, cacheFormatVersion)
 	}
 
-	reloaded := newTestCache(cachePath)
+	reloaded := newTestCache(t, cachePath)
 	if err := reloaded.LoadEntries(); err != nil {
 		t.Fatalf("LoadEntries() error = %v", err)
 	}
@@ -76,9 +141,9 @@ func TestCacheRejectsUnsupportedJSONVersion(t *testing.T) {
 	if err := os.WriteFile(cachePath, original, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cache := newTestCache(cachePath)
-	if err := cache.LoadEntries(); err == nil || !strings.Contains(err.Error(), "unsupported cache format version: 99") {
-		t.Fatalf("LoadEntries() error = %v, expected unsupported version 99", err)
+	cache, err := NewCacheWithError(CacheConfig{FilePath: cachePath, CurrentTime: func() time.Time { return cacheTestTime }})
+	if cache == nil || err == nil || !strings.Contains(err.Error(), "unsupported cache format version: 99") {
+		t.Fatalf("NewCacheWithError() = (%v, %v), expected non-nil cache and unsupported version 99", cache, err)
 	}
 	if err := cache.SaveEntries(context.Background()); err == nil || !strings.Contains(err.Error(), "unsupported cache format version: 99") {
 		t.Fatalf("SaveEntries() error = %v, expected unsupported version 99", err)
@@ -93,7 +158,7 @@ func TestCacheRejectsUnsupportedJSONVersion(t *testing.T) {
 }
 
 func TestCacheSeparatesMinimumAgeResults(t *testing.T) {
-	cache := newTestCache(filepath.Join(t.TempDir(), "cache"))
+	cache := newTestCache(t, filepath.Join(t.TempDir(), "cache"))
 	expiry := cacheTestTime.Add(time.Hour)
 	cache.Set(CacheEntry{
 		PackageName: "example", Type: "npm", Registry: "https://registry.npmjs.org", Constraint: "*",
@@ -131,9 +196,9 @@ func TestCacheRejectsNonJSONFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cache := newTestCache(cachePath)
-	if err := cache.LoadEntries(); err == nil {
-		t.Fatal("expected invalid cache format error")
+	cache, err := NewCacheWithError(CacheConfig{FilePath: cachePath, CurrentTime: func() time.Time { return cacheTestTime }})
+	if cache == nil || err == nil {
+		t.Fatalf("NewCacheWithError() = (%v, %v), expected non-nil cache and invalid format error", cache, err)
 	}
 	entry := CacheEntry{
 		PackageName:      "fresh",
@@ -149,7 +214,7 @@ func TestCacheRejectsNonJSONFormat(t *testing.T) {
 		t.Fatalf("SaveEntries() error = %v", err)
 	}
 
-	reloaded := newTestCache(cachePath)
+	reloaded := newTestCache(t, cachePath)
 	if err := reloaded.LoadEntries(); err != nil {
 		t.Fatalf("LoadEntries() after reset error = %v", err)
 	}
@@ -167,6 +232,7 @@ func TestCacheRejectsInvalidJSONShapes(t *testing.T) {
 	}{
 		{name: "unknown field", data: `{"version":1,"entries":[],"unexpected":true}`, errorContains: `unknown field "unexpected"`},
 		{name: "trailing value", data: `{"version":1,"entries":[]} {}`, errorContains: "multiple JSON values"},
+		{name: "malformed trailing syntax", data: `{"version":1,"entries":[]} {`, errorContains: "unexpected EOF"},
 	}
 
 	for _, test := range tests {
@@ -175,9 +241,9 @@ func TestCacheRejectsInvalidJSONShapes(t *testing.T) {
 			if err := os.WriteFile(cachePath, []byte(test.data), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			cache := newTestCache(cachePath)
-			if err := cache.LoadEntries(); err == nil || !strings.Contains(err.Error(), test.errorContains) {
-				t.Fatalf("LoadEntries() error = %v, expected %q", err, test.errorContains)
+			cache, err := NewCacheWithError(CacheConfig{FilePath: cachePath, CurrentTime: func() time.Time { return cacheTestTime }})
+			if cache == nil || err == nil || !strings.Contains(err.Error(), test.errorContains) {
+				t.Fatalf("NewCacheWithError() = (%v, %v), expected non-nil cache and %q", cache, err, test.errorContains)
 			}
 		})
 	}
@@ -186,7 +252,7 @@ func TestCacheRejectsInvalidJSONShapes(t *testing.T) {
 func TestCacheSaveEntriesLocksAcrossProcesses(t *testing.T) {
 	cachePath := os.Getenv("BUMP_CACHE_SAVE_TEST_PATH")
 	if cachePath != "" {
-		cache := newTestCache(cachePath)
+		cache := newTestCache(t, cachePath)
 		cache.Set(CacheEntry{PackageName: os.Getenv("BUMP_CACHE_SAVE_TEST_NAME"), Type: "npm", Constraint: "*", Expiry: cacheTestTime.Add(time.Hour)})
 		if os.Getenv("BUMP_CACHE_SAVE_TEST_MODE") == "merge" {
 			if err := cache.SaveEntries(context.Background()); err != nil {
@@ -330,7 +396,7 @@ func TestCacheBasicOps(t *testing.T) {
 	cachePath := getTestCachePath(t)
 
 	// Create cache without auto-loading
-	cache := newTestCache(cachePath)
+	cache := newTestCache(t, cachePath)
 
 	entry := CacheEntry{
 		PackageName:      "test-package",
@@ -356,7 +422,7 @@ func TestCacheBasicOps(t *testing.T) {
 	if err := cache.SaveEntries(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	reloadedCache := newTestCache(cachePath)
+	reloadedCache := newTestCache(t, cachePath)
 	if err := reloadedCache.LoadEntries(); err != nil {
 		t.Fatal(err)
 	}
@@ -369,7 +435,7 @@ func TestCacheBasicOps(t *testing.T) {
 
 func TestCacheRegistryDifferentiation(t *testing.T) {
 	cachePath := getTestCachePath(t)
-	cache := newTestCache(cachePath)
+	cache := newTestCache(t, cachePath)
 
 	entryNpm := CacheEntry{
 		PackageName:      "foo",
@@ -408,7 +474,7 @@ func TestCacheRegistryDifferentiation(t *testing.T) {
 
 func TestCacheDifferentiatesSamePackageAcrossRegistries(t *testing.T) {
 	cachePath := getTestCachePath(t)
-	cache := newTestCache(cachePath)
+	cache := newTestCache(t, cachePath)
 
 	publicEntry := CacheEntry{
 		PackageName:      "@company/core",
@@ -448,7 +514,7 @@ func TestCacheDifferentiatesSamePackageAcrossRegistries(t *testing.T) {
 
 func TestCacheExpiry(t *testing.T) {
 	cachePath := getTestCachePath(t)
-	cache := newTestCache(cachePath)
+	cache := newTestCache(t, cachePath)
 
 	entry := CacheEntry{
 		PackageName:      "foo",
@@ -473,7 +539,7 @@ func TestCacheExpiredCleanup(t *testing.T) {
 	cachePath := getTestCachePath(t)
 
 	// Create cache without auto-loading
-	cache := newTestCache(cachePath)
+	cache := newTestCache(t, cachePath)
 
 	now := cacheTestTime
 	pastTime := now.Add(-24 * time.Hour)  // Clearly expired
@@ -533,8 +599,8 @@ func TestCacheExpiredCleanup(t *testing.T) {
 
 func TestConcurrentCacheSavesMergeEntries(t *testing.T) {
 	cachePath := filepath.Join(t.TempDir(), ".bump-cache")
-	first := newTestCache(cachePath)
-	second := newTestCache(cachePath)
+	first := newTestCache(t, cachePath)
+	second := newTestCache(t, cachePath)
 	firstEntry := CacheEntry{PackageName: "first", Type: "npm", Registry: "https://registry.npmjs.org", Constraint: "*", AbsoluteLatest: "1.0.0", ConstraintLatest: "1.0.0", Expiry: cacheTestTime.Add(time.Hour)}
 	secondEntry := CacheEntry{PackageName: "second", Type: "pub", Registry: "https://pub.dev", Constraint: "*", AbsoluteLatest: "2.0.0", ConstraintLatest: "2.0.0", Expiry: cacheTestTime.Add(time.Hour)}
 	first.Set(firstEntry)
@@ -561,7 +627,7 @@ func TestConcurrentCacheSavesMergeEntries(t *testing.T) {
 		}
 	}
 
-	reloaded := newTestCache(cachePath)
+	reloaded := newTestCache(t, cachePath)
 	if err := reloaded.LoadEntries(); err != nil {
 		t.Fatal(err)
 	}

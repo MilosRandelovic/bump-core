@@ -54,12 +54,21 @@ func runProtocolInput(t *testing.T, input string, configure func(*Server)) []map
 }
 
 func TestServerRejectsTrailingJSON(t *testing.T) {
-	messages := runProtocolInput(t, `{"method":"detect","id":1,"params":{"directory":"."}} {}`+"\n", nil)
-	if len(messages) != 1 || messageType(t, messages[0]) != "error" {
-		t.Fatalf("unexpected messages: %#v", messages)
-	}
-	if errorMessage := messageError(t, messages[0]); !strings.Contains(errorMessage, "multiple JSON values") {
-		t.Fatalf("error = %q, expected trailing JSON rejection", errorMessage)
+	for _, test := range []struct {
+		name, tail, errorContains string
+	}{
+		{"second value", " {}", "multiple JSON values"},
+		{"malformed syntax", " {", "unexpected EOF"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			messages := runProtocolInput(t, `{"method":"detect","id":1,"params":{"directory":"."}}`+test.tail+"\n", nil)
+			if len(messages) != 1 || messageType(t, messages[0]) != "error" {
+				t.Fatalf("unexpected messages: %#v", messages)
+			}
+			if errorMessage := messageError(t, messages[0]); !strings.Contains(errorMessage, test.errorContains) {
+				t.Fatalf("error = %q, expected %q", errorMessage, test.errorContains)
+			}
+		})
 	}
 }
 
