@@ -6,7 +6,7 @@ import (
 	"fmt"
 )
 
-// DependencyType represents the type of dependency
+// DependencyType identifies a dependency-file section.
 type DependencyType int
 
 // Supported dependency sections.
@@ -30,7 +30,7 @@ func (dependencyType DependencyType) String() string {
 	}
 }
 
-// RegistryType represents the type of package registry
+// RegistryType identifies a supported package ecosystem.
 type RegistryType int
 
 // Supported package registries.
@@ -51,7 +51,7 @@ func (registryType RegistryType) String() string {
 	}
 }
 
-// SkipReason represents the reason a dependency was skipped
+// SkipReason identifies why an available update was not suggested.
 type SkipReason int
 
 // Reasons a dependency update can be skipped.
@@ -72,7 +72,7 @@ func (skipReason SkipReason) String() string {
 	}
 }
 
-// BaseDependency contains the core fields shared by all dependency types
+// BaseDependency contains source details shared by checked and outdated dependencies.
 type BaseDependency struct {
 	Name            string         // Name of the package
 	OriginalVersion string         // Original version with prefixes (e.g., "^1.2.3")
@@ -82,39 +82,39 @@ type BaseDependency struct {
 	LineNumber      int            // Line number where this dependency is defined (1-based)
 }
 
-// Dependency represents a package dependency
+// Dependency is a parsed package dependency.
 type Dependency struct {
 	BaseDependency
 	Version string // Clean version for API calls (e.g., "1.2.3")
 }
 
-// OutdatedDependency represents a dependency that has a newer version available
+// OutdatedDependency is a dependency with a newer eligible version.
 type OutdatedDependency struct {
 	BaseDependency
 	CurrentVersion string // Current version of the package
 	LatestVersion  string // Latest version available
 }
 
-// SemverSkipped represents a dependency that was skipped due to semver constraints
+// SemverSkipped is an update excluded by the selected semantic-version policy.
 type SemverSkipped struct {
 	OutdatedDependency
 	Reason SkipReason // Reason why the dependency was skipped
 }
 
-// CheckResult contains the results of checking dependencies
+// CheckResult contains available updates, policy skips, and per-dependency failures.
 type CheckResult struct {
 	Outdated      []OutdatedDependency
 	Errors        []DependencyError
 	SemverSkipped []SemverSkipped
 }
 
-// DependencyError represents an error that occurred while checking a dependency
+// DependencyError identifies a dependency that could not be checked.
 type DependencyError struct {
 	Name  string
 	Error string
 }
 
-// SemverChange represents the type of version change
+// SemverChange classifies the magnitude of a dependency update.
 type SemverChange int
 
 // Semantic-version change levels.
@@ -124,10 +124,8 @@ const (
 	MajorChange
 )
 
-// Options contains all configuration flags for the application
+// Options controls dependency parsing, registry checks, and updates.
 type Options struct {
-	Verbose                  bool
-	Update                   bool
 	Semver                   bool
 	NoCache                  bool
 	IncludePeerDependencies  bool
@@ -150,7 +148,6 @@ type ProgressFunc func(progress Progress)
 // LogFunc receives optional diagnostic output.
 type LogFunc func(format string, args ...any)
 
-// Custom error types for better error handling
 var (
 	// ErrNoVersionsSatisfyConstraint indicates that no versions match the given semver constraint.
 	ErrNoVersionsSatisfyConstraint = errors.New("no versions satisfy the constraint")

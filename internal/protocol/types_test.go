@@ -9,7 +9,6 @@ import (
 func TestOptionsParamsToOptions(t *testing.T) {
 	params := OptionsParams{
 		Verbose:                 true,
-		Update:                  true,
 		Semver:                  true,
 		NoCache:                 true,
 		IncludePeerDependencies: true,
@@ -17,8 +16,6 @@ func TestOptionsParamsToOptions(t *testing.T) {
 		MinimumAge:              true,
 	}
 	expected := shared.Options{
-		Verbose:                  true,
-		Update:                   true,
 		Semver:                   true,
 		NoCache:                  true,
 		IncludePeerDependencies:  true,

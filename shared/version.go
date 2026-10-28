@@ -9,8 +9,8 @@ import (
 	"github.com/Masterminds/semver/v3"
 )
 
-// Version is the single source of truth for the bump version across all repos
-const Version = "2.2.0"
+// Version is the single source of truth for the bump version across all repositories.
+const Version = "2.2.1"
 
 var (
 	versionPrefixCaptureRegex = regexp.MustCompile(`^([\^~>=<]+)`)
@@ -66,7 +66,6 @@ func HasSemanticPrefix(version string) bool {
 		return false
 	}
 
-	// Common semantic versioning prefixes
 	prefixes := []string{"^", "~", ">=", ">", "<=", "<"}
 	hasPrefix := false
 	for _, prefix := range prefixes {
@@ -76,18 +75,13 @@ func HasSemanticPrefix(version string) bool {
 		}
 	}
 
-	// If it doesn't start with a semantic prefix, it's not semantic
 	if !hasPrefix {
 		return false
 	}
 
-	// Check if it contains mixed semantic and non-semantic parts
-	// Split by spaces and check if there are multiple parts
 	parts := strings.Fields(version)
 	if len(parts) > 1 {
-		// For multiple parts, all parts should have semantic prefixes or be range operators
 		for _, part := range parts {
-			// Skip range operators
 			if part == "&&" || part == "||" {
 				continue
 			}
@@ -100,7 +94,6 @@ func HasSemanticPrefix(version string) bool {
 				}
 			}
 
-			// If any part doesn't have a semantic prefix, it's mixed
 			if !partHasPrefix {
 				return false
 			}
@@ -131,21 +124,17 @@ func FindBothLatestVersions(versions []string, constraint string) (absoluteLates
 	// is not itself a version, so stripping only its leading operator breaks
 	// compound ranges such as ">=1.0.0 <2.0.0".
 	currentVersion := CleanVersion(constraint)
-	// CleanVersion selects the reference version without treating a compound range as a version.
 	currentSemver, err := semver.NewVersion(currentVersion)
 	if err != nil {
 		return "", "", fmt.Errorf("invalid current version: %s", currentVersion)
 	}
 
-	// Parse versions using semver and build map from semver string to original
 	var collection semver.Collection
-	versionMap := make(map[string]string) // semver string -> original string
+	versionMap := make(map[string]string)
 
 	for _, versionString := range versions {
 		parsedVersion, err := semver.NewVersion(versionString)
 		if err != nil {
-
-			// Skip invalid versions
 			continue
 		}
 		collection = append(collection, parsedVersion)
@@ -156,10 +145,8 @@ func FindBothLatestVersions(versions []string, constraint string) (absoluteLates
 		return "", "", fmt.Errorf("no valid semver versions found")
 	}
 
-	// Sort versions using semver.Collection's built-in sort
 	sort.Sort(collection)
 
-	// Determine if we should include prereleases based on current version
 	includePrerelease := currentSemver.Prerelease() != ""
 	for _, versionToken := range versionTokenRegex.FindAllString(constraint, -1) {
 		parsedToken, parseErr := semver.NewVersion(strings.TrimPrefix(strings.TrimPrefix(versionToken, "v"), "V"))
@@ -169,7 +156,6 @@ func FindBothLatestVersions(versions []string, constraint string) (absoluteLates
 		}
 	}
 
-	// Find absolute latest (stable or prerelease depending on current version)
 	for i := len(collection) - 1; i >= 0; i-- {
 		if includePrerelease || collection[i].Prerelease() == "" {
 			absoluteLatest = versionMap[collection[i].String()]
@@ -184,10 +170,8 @@ func FindBothLatestVersions(versions []string, constraint string) (absoluteLates
 		return "", "", fmt.Errorf("no stable versions available")
 	}
 
-	// Parse the constraint
 	effectiveConstraint := constraint
 	if GetVersionPrefix(constraint) == "" {
-		// No prefix means exact version, we want newer versions
 		effectiveConstraint = ">" + currentVersion
 	}
 
@@ -196,10 +180,8 @@ func FindBothLatestVersions(versions []string, constraint string) (absoluteLates
 		return absoluteLatest, "", fmt.Errorf("invalid constraint: %s", effectiveConstraint)
 	}
 
-	// Set IncludePrerelease based on current version
 	parsedConstraint.IncludePrerelease = includePrerelease
 
-	// Find latest satisfying constraint (iterate from end since collection is sorted)
 	for i := len(collection) - 1; i >= 0; i-- {
 		if parsedConstraint.Check(collection[i]) {
 			constraintLatest = versionMap[collection[i].String()]
@@ -216,15 +198,14 @@ func FindBothLatestVersions(versions []string, constraint string) (absoluteLates
 
 // GetSemverChange classifies an upgrade as major, minor, or patch.
 // Invalid versions, equal versions, and downgrades fall back to PatchChange.
-func GetSemverChange(currentVer, latestVer string) SemverChange {
-	current, currentErr := semver.NewVersion(CleanVersion(currentVer))
-	latest, latestErr := semver.NewVersion(CleanVersion(latestVer))
+func GetSemverChange(currentVersion, latestVersion string) SemverChange {
+	current, currentErr := semver.NewVersion(CleanVersion(currentVersion))
+	latest, latestErr := semver.NewVersion(CleanVersion(latestVersion))
 
 	if currentErr != nil || latestErr != nil {
 		return PatchChange
 	}
 
-	// If the latest version is less than or equal to current, default to patch
 	if !latest.GreaterThan(current) {
 		return PatchChange
 	}

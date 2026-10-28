@@ -20,9 +20,12 @@ import (
 )
 
 type concurrentLogRegistry struct {
-	active    atomic.Int32
-	maxActive atomic.Int32
-	delays    map[string]time.Duration
+	active             atomic.Int32
+	maxActive          atomic.Int32
+	concurrentStarted  chan struct{}
+	releaseConcurrency sync.Once
+	waitForLater       chan struct{}
+	completed          chan string
 }
 
 func TestValidateOptionsRejectsUnsupportedRegistry(t *testing.T) {
@@ -58,13 +61,28 @@ func (registry *concurrentLogRegistry) GetLatestVersionFromRegistry(ctx context.
 			break
 		}
 	}
-	select {
-	case <-time.After(registry.delays[packageName]):
-	case <-ctx.Done():
-		return "", ctx.Err()
+	if registry.concurrentStarted != nil {
+		if active >= 2 {
+			registry.releaseConcurrency.Do(func() { close(registry.concurrentStarted) })
+		}
+		select {
+		case <-registry.concurrentStarted:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 	}
 	if log := shared.LogFromContext(ctx); log != nil {
 		log("registry detail: %s\n", packageName)
+	}
+	if packageName == "package-0" && registry.waitForLater != nil {
+		select {
+		case <-registry.waitForLater:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	if registry.completed != nil {
+		registry.completed <- packageName
 	}
 	return "2.0.0", nil
 }
@@ -630,20 +648,27 @@ func TestUpdateDependenciesHonoursCancellationBeforeWriting(t *testing.T) {
 }
 
 func TestVerboseChecksStayConcurrentAndFlushLogsInDependencyOrder(t *testing.T) {
-	dependencies := make([]shared.Dependency, 6)
-	delays := make(map[string]time.Duration, len(dependencies))
+	dependencies := make([]shared.Dependency, 2)
 	for index := range dependencies {
 		name := fmt.Sprintf("package-%d", index)
 		dependencies[index] = shared.Dependency{
 			BaseDependency: shared.BaseDependency{Name: name, OriginalVersion: "1.0.0", Type: shared.Dependencies, FilePath: "/project/package.json", LineNumber: index + 1},
 			Version:        "1.0.0",
 		}
-		delays[name] = time.Duration(len(dependencies)-index) * 5 * time.Millisecond
 	}
-	registry := &concurrentLogRegistry{delays: delays}
+	registry := &concurrentLogRegistry{concurrentStarted: make(chan struct{}), waitForLater: make(chan struct{}), completed: make(chan string, len(dependencies))}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var completionOrder []string
 	var logs strings.Builder
 	result, err := checkOutdatedWithRegistryClient(
-		context.Background(), dependencies, registry, shared.Options{}, "/project", nil,
+		ctx, dependencies, registry, shared.Options{}, "/project", func(progress shared.Progress) {
+			name := <-registry.completed
+			completionOrder = append(completionOrder, name)
+			if name == "package-1" {
+				close(registry.waitForLater)
+			}
+		},
 		func(format string, args ...any) { fmt.Fprintf(&logs, format, args...) }, nil,
 	)
 	if err != nil {
@@ -654,6 +679,14 @@ func TestVerboseChecksStayConcurrentAndFlushLogsInDependencyOrder(t *testing.T) 
 	}
 	if registry.maxActive.Load() < 2 {
 		t.Fatalf("maximum concurrent checks = %d", registry.maxActive.Load())
+	}
+	if !reflect.DeepEqual(completionOrder, []string{"package-1", "package-0"}) {
+		t.Fatalf("completion order = %#v", completionOrder)
+	}
+	for index, dependency := range result.Outdated {
+		if dependency.Name != dependencies[index].Name {
+			t.Fatalf("outdated order = %#v", result.Outdated)
+		}
 	}
 	previousPosition := -1
 	for index := range dependencies {
@@ -671,9 +704,7 @@ func TestCheckOutdatedPreservesInputOrderAcrossFiles(t *testing.T) {
 		{BaseDependency: shared.BaseDependency{Name: "second", OriginalVersion: "1.0.0", Type: shared.Dependencies, FilePath: "/project/package.json"}, Version: "1.0.0"},
 		{BaseDependency: shared.BaseDependency{Name: "third", OriginalVersion: "1.0.0", Type: shared.Dependencies, FilePath: "/project/packages/app/package.json"}, Version: "1.0.0"},
 	}
-	registry := &concurrentLogRegistry{delays: map[string]time.Duration{
-		"first": 3 * time.Millisecond, "second": 2 * time.Millisecond, "third": time.Millisecond,
-	}}
+	registry := &concurrentLogRegistry{}
 	var logs strings.Builder
 	var progressUpdates []shared.Progress
 	result, err := checkOutdatedWithRegistryClient(

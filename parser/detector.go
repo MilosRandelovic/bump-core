@@ -12,7 +12,6 @@ import (
 // package.json takes precedence over pubspec.yaml; log receives the detected relative path when non-nil.
 func AutoDetectDependencyFile(directory string, log shared.LogFunc) (string, shared.RegistryType, error) {
 
-	// Check for package.json first
 	packageJSON := filepath.Join(directory, "package.json")
 	if _, err := os.Stat(packageJSON); err == nil {
 		relativePath, err := filepath.Rel(directory, packageJSON)
@@ -27,17 +26,16 @@ func AutoDetectDependencyFile(directory string, log shared.LogFunc) (string, sha
 		return "", 0, fmt.Errorf("failed to inspect package.json: %w", err)
 	}
 
-	// Check for pubspec.yaml
-	pubspecYaml := filepath.Join(directory, "pubspec.yaml")
-	if _, err := os.Stat(pubspecYaml); err == nil {
-		relativePath, err := filepath.Rel(directory, pubspecYaml)
+	pubspecYAML := filepath.Join(directory, "pubspec.yaml")
+	if _, err := os.Stat(pubspecYAML); err == nil {
+		relativePath, err := filepath.Rel(directory, pubspecYAML)
 		if err != nil {
-			relativePath = pubspecYaml
+			relativePath = pubspecYAML
 		}
 		if log != nil {
 			log("Found pub file: %s\n", relativePath)
 		}
-		return pubspecYaml, shared.Pub, nil
+		return pubspecYAML, shared.Pub, nil
 	} else if !os.IsNotExist(err) {
 		return "", 0, fmt.Errorf("failed to inspect pubspec.yaml: %w", err)
 	}

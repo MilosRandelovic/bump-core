@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.2.1]
+
+- Reject unknown and malformed sidecar and cache fields and require request IDs explicitly
+- Bound npm and Pub registry response bodies
+- Serialize cache persistence across processes and make cache expiry tests deterministic
+- Keep CLI-only behavior out of the shared library options
+- Align public contracts, naming, documentation, and CI with the workspace standards
+
 ## [2.2.0]
 
 - Add a stdio MCP server for scoped absolute, semver-compatible, and minimum-age npm and Pub dependency checks and updates
