@@ -54,19 +54,27 @@ type Cache struct {
 	onLockBlocked func()
 }
 
+// CacheConfig supplies the persistent location and required clock for a cache.
+type CacheConfig struct {
+	FilePath    string
+	CurrentTime func() time.Time
+}
+
 // NewCacheWithError creates a cache and reports any initialization or load error.
 // A non-nil cache may be returned with a load error so callers can continue with
 // an empty cache and surface the warning to users.
-func NewCacheWithError() (*Cache, error) {
-	homeDirectory, err := os.UserHomeDir()
-	if err != nil {
-		return nil, fmt.Errorf("failed to resolve home directory: %w", err)
+func NewCacheWithError(config CacheConfig) (*Cache, error) {
+	if config.FilePath == "" {
+		return nil, fmt.Errorf("cache file path is required")
 	}
-	filePath := filepath.Join(homeDirectory, ".bump-cache")
+	if config.CurrentTime == nil {
+		return nil, fmt.Errorf("cache clock is required")
+	}
 
 	cache := &Cache{
-		entries:  make(map[string]CacheEntry),
-		filePath: filePath,
+		entries:     make(map[string]CacheEntry),
+		filePath:    config.FilePath,
+		currentTime: config.CurrentTime,
 	}
 
 	if err := cache.LoadEntries(); err != nil {
@@ -299,10 +307,7 @@ func (c *Cache) CleanExpiredEntries() {
 }
 
 func (c *Cache) now() time.Time {
-	if c.currentTime != nil {
-		return c.currentTime()
-	}
-	return time.Now()
+	return c.currentTime()
 }
 
 func acquireCachePersistenceLock(ctx context.Context, cachePath string, onBlocked func()) (*os.File, error) {

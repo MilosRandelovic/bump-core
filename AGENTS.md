@@ -38,7 +38,9 @@ Library packages never print. Optional diagnostics use `shared.LogFunc`; the sid
 
 - `CheckOutdated` runs at most six registry checks per file, preserves dependency order in results and diagnostics, reports per-file and overall progress, and stops scheduling work after cancellation.
 - Registry clients cap response bodies before decoding and never contact a live registry from tests.
-- The persistent cache is versioned strict JSON at `~/.bump-cache`. Cache keys are structured JSON, never delimiter-composed strings, and include package name, dependency type, registry, current version, constraint, and minimum-age policy when enabled. Minimum-age results expire when the next release becomes eligible if that occurs before the normal expiry.
+- The persistent cache is versioned strict JSON at `~/.bump-cache`. Cache keys are structured JSON, never delimiter-composed strings, and include package name, ecosystem, registry, current-version dimension, constraint, and minimum-age policy when enabled. Registry clients leave the current-version dimension empty because their lookup results do not depend on the installed version. Minimum-age results expire when the next release becomes eligible if that occurs before the normal expiry.
+- Cache construction requires an explicit `CacheConfig` path and clock. The updater supplies the user's cache location and production clock; persistence tests use the same constructor with a temporary path and fixed clock so they cannot inherit real time or the user's cache.
+- Cache eviction is expiry-based, without an additional byte or entry-count budget: it stores only registry version metadata, not package archives, and each save removes lookups older than the ten-minute lifetime. Retention follows the recent dependency workload rather than accumulating historical packages. This is deliberate for a short-lived local CLI; a cardinality cap would evict still-useful workspace lookups and force additional registry calls. An idle cache file remains on disk until the next save.
 - Cache saves take process-local and operating-system locks, observe request cancellation while waiting for the operating-system lock, reload and merge the current file, remove expired entries, and atomically replace it with mode `0600`. Unsupported cache versions fail without being overwritten; other invalid cache data may be replaced by fresh results.
 - `updater.UpdateDependencies` locks canonical target paths across goroutines and processes for the complete prepare/apply transaction and acquires multi-file locks in deterministic order.
 - Prepare and validate every target before writing the first file. Validate the source location, original and replacement versions, and resulting constraint; changed input fails safely.
@@ -48,11 +50,7 @@ Library packages never print. Optional diagnostics use `shared.LogFunc`; the sid
 
 ## Sidecar contract
 
-Each request, response, log message, and progress event occupies one JSON line. Owned JSON schemas reject unknown fields and trailing values. Request IDs are required integers; zero is valid and appears in every correlated message.
-
-The sidecar supports `detect`, `check`, `update`, and `cancel`. `check` selects one version policy and optional dependency targets. A target intersects its package name, dependency type, and file path fields; multiple targets form a union; omitted targets select all parsed dependencies; invalid or unmatched targets fail. `update` applies the supplied checked updates.
-
-Regular requests run concurrently up to an exact limit of eight. Additional work is rejected immediately with the machine-readable `request_limit_exceeded` code so a client can retry; cancellation stays available and does not consume a slot. Duplicate active IDs fail, and every started request has cancellation and wait ownership. The encoder serializes all response, log, and progress writes so concurrent requests cannot interleave JSON lines. Check cancellation before starting registry work and before dependency-update prepare/apply operations so canceled requests stop before new work begins.
+The canonical wire contract is [docs/sidecar-protocol.md](docs/sidecar-protocol.md). Update it with any protocol change and keep the consuming frontend's wire types aligned. `internal/protocol/server_test.go` holds request decoding, correlation, capacity, and cancellation regressions; transport implementation changes must preserve those tests' lifecycle and serialization guarantees.
 
 ## MCP contract
 
@@ -68,7 +66,7 @@ Keep MCP version policy and target selection identical to the sidecar. Forward t
 
 The release workflow runs on pushes to `main` and does not repeat formatting, vet, or tests because required, up-to-date PR CI has already checked the merged tree. It builds the sidecar to read its version, rejects an existing tag, creates the tag and GitHub source release, and opens a dependency-update pull request in `homebrew-bump`. Workflow actions use their latest supported major tags.
 
-The Homebrew formula builds `bump-mcp` from the released module version, so the bump-core release must complete before the generated `homebrew-bump` update is merged.
+Before removing public API used by the CLI, merge a frontend preparation that compiles with both the released and upcoming core APIs into `homebrew-bump`: the core release workflow checks out and builds that repository's `main`. The Homebrew formula builds `bump-mcp` from the released module version, so the generated dependency-pin update follows the core release, not that compatibility preparation.
 
 Validate workflow edits locally with `make workflow-lint`; Actionlint is intentionally not part of CI because CI should validate the product rather than validate its own workflow syntax.
 

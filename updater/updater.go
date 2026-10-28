@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/MilosRandelovic/bump-core/v2/npm"
@@ -49,8 +50,13 @@ func CheckOutdated(ctx context.Context, dependencies []shared.Dependency, regist
 
 	var cache *shared.Cache
 	if !options.NoCache {
-		var cacheErr error
-		cache, cacheErr = shared.NewCacheWithError()
+		homeDirectory, cacheErr := os.UserHomeDir()
+		if cacheErr == nil {
+			cache, cacheErr = shared.NewCacheWithError(shared.CacheConfig{
+				FilePath:    filepath.Join(homeDirectory, ".bump-cache"),
+				CurrentTime: time.Now,
+			})
+		}
 		if cacheErr != nil && log != nil {
 			log("Warning: Could not load cache: %v\n", cacheErr)
 		}
