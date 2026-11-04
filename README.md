@@ -69,9 +69,12 @@ The `bump-mcp` stdio server lets coding agents check and update dependencies usi
 
 ```bash
 make build
-codex mcp add bump -- /absolute/path/to/bump-mcp
 claude mcp add bump -- /absolute/path/to/bump-mcp
+codex mcp add bump -- /absolute/path/to/bump-mcp
+grok mcp add bump -- /absolute/path/to/bump-mcp
 ```
+
+For Grok CLI, verify the connection with `grok mcp doctor bump`.
 
 It exposes two tools:
 
