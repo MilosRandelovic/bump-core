@@ -34,13 +34,22 @@ const (
 	ErrorCodeRequestLimitExceeded ErrorCode = "request_limit_exceeded"
 )
 
-// Response represents a JSON response sent over stdout.
-type Response struct {
-	ID     int       `json:"id"`
-	Type   string    `json:"type"`
-	Result any       `json:"result,omitempty"`
-	Code   ErrorCode `json:"code,omitempty"`
-	Error  string    `json:"error,omitempty"`
+type resultPayload interface {
+	*DetectResult | *CheckResult | *UpdateResult | *CancelResult
+}
+
+// Response carries a supported method result over stdout.
+type Response[T resultPayload] struct {
+	ID     int    `json:"id"`
+	Type   string `json:"type"`
+	Result T      `json:"result,omitempty"`
+}
+
+type errorResponse struct {
+	ID    int       `json:"id"`
+	Type  string    `json:"type"`
+	Code  ErrorCode `json:"code,omitempty"`
+	Error string    `json:"error,omitempty"`
 }
 
 // LogMessage is an out-of-band log message sent during processing.

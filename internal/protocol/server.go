@@ -225,7 +225,7 @@ func (s *Server) handleDetect(ctx context.Context, request *Request) {
 		return
 	}
 
-	s.sendResult(request.ID, &DetectResult{
+	sendResult(s, request.ID, &DetectResult{
 		FilePath:     filePath,
 		RegistryType: registryType.String(),
 	})
@@ -283,7 +283,7 @@ func (s *Server) handleCheck(ctx context.Context, request *Request) {
 		return
 	}
 
-	s.sendResult(request.ID, FromCheckResult(checkResult))
+	sendResult(s, request.ID, FromCheckResult(checkResult))
 }
 
 func (s *Server) handleUpdate(ctx context.Context, request *Request) {
@@ -326,7 +326,7 @@ func (s *Server) handleUpdate(ctx context.Context, request *Request) {
 		s.sendError(request.ID, fmt.Sprintf("update error: %v", err))
 		return
 	}
-	s.sendResult(request.ID, &UpdateResult{Updated: len(outdated)})
+	sendResult(s, request.ID, &UpdateResult{Updated: len(outdated)})
 }
 
 func (s *Server) makeLogFunc(id int) shared.LogFunc {
@@ -336,8 +336,8 @@ func (s *Server) makeLogFunc(id int) shared.LogFunc {
 	}
 }
 
-func (s *Server) sendResult(id int, result any) {
-	s.encode(&Response{
+func sendResult[T resultPayload](server *Server, id int, result T) {
+	server.encode(&Response[T]{
 		ID:     id,
 		Type:   "result",
 		Result: result,
@@ -349,7 +349,7 @@ func (s *Server) sendError(id int, errorMessage string) {
 }
 
 func (s *Server) sendCodedError(id int, code ErrorCode, errorMessage string) {
-	s.encode(&Response{
+	s.encode(&errorResponse{
 		ID:    id,
 		Type:  "error",
 		Code:  code,
@@ -450,7 +450,7 @@ func (s *Server) handleCancel(request *Request) {
 		s.sendError(request.ID, "cancel target id is required")
 		return
 	}
-	s.sendResult(request.ID, &CancelResult{Cancelled: s.cancelRequest(*params.ID)})
+	sendResult(s, request.ID, &CancelResult{Cancelled: s.cancelRequest(*params.ID)})
 }
 
 func decodeJSON(data []byte, destination any) error {
