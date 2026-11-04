@@ -263,6 +263,14 @@ func TestServerCheckWiresVerboseLogsAndGlobalProgress(t *testing.T) {
 	if progressMessage.FilePath != filePath || progressMessage.FileCurrent != 1 || progressMessage.FileTotal != 1 || progressMessage.Current != 1 || progressMessage.Total != 1 {
 		t.Fatalf("unexpected progress message: %#v", progressMessage)
 	}
+	var checkResult CheckResult
+	if err := json.Unmarshal(messages[3]["result"], &checkResult); err != nil {
+		t.Fatal(err)
+	}
+	expectedOutdated := OutdatedDependencyInfo{Name: "example", Type: "dependencies", CurrentVersion: "1.0.0", OriginalVersion: "^1.0.0", LatestVersion: "1.1.0", FilePath: filePath, LineNumber: 3}
+	if len(checkResult.Outdated) != 1 || checkResult.Outdated[0] != expectedOutdated || checkResult.SemverSkipped == nil || len(checkResult.SemverSkipped) != 0 || checkResult.Errors == nil || len(checkResult.Errors) != 0 {
+		t.Fatalf("unexpected check result: %#v", checkResult)
+	}
 }
 
 func TestServerCheckFiltersTargets(t *testing.T) {
@@ -324,6 +332,13 @@ func TestServerUpdateEndToEnd(t *testing.T) {
 	}, nil)
 	if len(messages) != 1 || messageType(t, messages[0]) != "result" {
 		t.Fatalf("unexpected messages: %#v", messages)
+	}
+	var updateResult UpdateResult
+	if err := json.Unmarshal(messages[0]["result"], &updateResult); err != nil {
+		t.Fatal(err)
+	}
+	if updateResult.Updated != 1 {
+		t.Fatalf("updated count = %d, want 1", updateResult.Updated)
 	}
 
 	updated, err := os.ReadFile(filePath)

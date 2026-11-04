@@ -38,8 +38,8 @@ type resultPayload interface {
 	*DetectResult | *CheckResult | *UpdateResult | *CancelResult
 }
 
-// Response carries a supported method result over stdout.
-type Response[T resultPayload] struct {
+// resultResponse carries a supported method result over stdout.
+type resultResponse[T resultPayload] struct {
 	ID     int    `json:"id"`
 	Type   string `json:"type"`
 	Result T      `json:"result,omitempty"`

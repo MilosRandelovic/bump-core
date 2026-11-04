@@ -58,13 +58,15 @@ func TestResultPayloadRejectsUnsupportedTypes(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, test := range []struct {
-		name string
-		body string
+		name           string
+		body           string
+		wantDiagnostic string
 	}{
-		{"response string", `_ = Response[string]{Result: "unsupported"}`},
-		{"response any", `_ = Response[any]{Result: &UpdateResult{}}`},
-		{"send string", `sendResult((*Server)(nil), 0, "unsupported")`},
-		{"send any", `var result any = &UpdateResult{}; sendResult((*Server)(nil), 0, result)`},
+		{"response string", `_ = resultResponse[string]{Result: "unsupported"}`, "does not satisfy resultPayload"},
+		{"response any", `_ = resultResponse[any]{Result: &UpdateResult{}}`, "does not satisfy resultPayload"},
+		{"response field", `_ = resultResponse[*DetectResult]{Result: "unsupported"}`, `cannot use "unsupported"`},
+		{"send string", `sendResult((*Server)(nil), 0, "unsupported")`, "does not satisfy resultPayload"},
+		{"send any", `var result any = &UpdateResult{}; sendResult((*Server)(nil), 0, result)`, "does not satisfy resultPayload"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			directory := t.TempDir()
@@ -88,7 +90,7 @@ func TestResultPayloadRejectsUnsupportedTypes(t *testing.T) {
 			command := exec.CommandContext(ctx, filepath.Join(runtime.GOROOT(), "bin", "go"), "test", "-vet=off", "-run=^$", "-overlay="+overlayPath, ".")
 			command.Env = append(os.Environ(), "GOTOOLCHAIN=local", "GOWORK=off", "GOPROXY=off", "GOSUMDB=off", "GOFLAGS=")
 			output, err := command.CombinedOutput()
-			if err == nil || !strings.Contains(string(output), "does not satisfy resultPayload") {
+			if err == nil || !strings.Contains(string(output), test.wantDiagnostic) {
 				t.Fatalf("compiler must reject unsupported payload: error = %v, output = %s", err, output)
 			}
 		})

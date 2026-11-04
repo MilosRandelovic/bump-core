@@ -337,7 +337,7 @@ func (s *Server) makeLogFunc(id int) shared.LogFunc {
 }
 
 func sendResult[T resultPayload](server *Server, id int, result T) {
-	server.encode(&Response[T]{
+	server.encode(&resultResponse[T]{
 		ID:     id,
 		Type:   "result",
 		Result: result,
