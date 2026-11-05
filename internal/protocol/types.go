@@ -214,7 +214,7 @@ func FromCheckResult(checkResult *shared.CheckResult) *CheckResult {
 	return result
 }
 
-// ToOutdatedDependencies converts wire-level updates to library dependencies and rejects unknown dependency types.
+// ToOutdatedDependencies converts wire-level updates to library dependencies and validates required update fields.
 func ToOutdatedDependencies(infos []OutdatedDependencyInfo) ([]shared.OutdatedDependency, error) {
 	result := make([]shared.OutdatedDependency, 0, len(infos))
 	for _, info := range infos {
@@ -228,6 +228,9 @@ func ToOutdatedDependencies(infos []OutdatedDependencyInfo) ([]shared.OutdatedDe
 			dependencyType = shared.PeerDependencies
 		default:
 			return nil, fmt.Errorf("unsupported dependency type %q for %s", info.Type, info.Name)
+		}
+		if info.OriginalVersion == "" {
+			return nil, fmt.Errorf("originalVersion is required for %s", info.Name)
 		}
 		result = append(result, shared.OutdatedDependency{
 			BaseDependency: shared.BaseDependency{

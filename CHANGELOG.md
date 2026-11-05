@@ -3,6 +3,7 @@
 ## [2.2.1]
 
 - Reject unknown and malformed sidecar and cache fields and require request IDs explicitly
+- Require a non-empty original version for every sidecar update entry
 - Bound npm and Pub registry response bodies
 - Serialize cache persistence across processes and make cache expiry tests deterministic
 - Keep CLI-only behavior out of the shared library options

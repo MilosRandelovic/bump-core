@@ -20,10 +20,10 @@ Every request has a `method`, an integer `id`, and method-specific `params`. IDs
 | --- | --- | --- |
 | `detect` | Non-empty `directory` | `filePath` and `registryType` |
 | `check` | Non-empty `filePath`, `registryType`, optional `options` and `targets` | `outdated`, `semverSkipped`, and `errors` arrays |
-| `update` | Non-empty `filePath`, `registryType`, optional `options`, and caller-supplied `outdated` entries with replacement versions | `updated`, the number of entries supplied to the update operation |
+| `update` | Non-empty `filePath`, `registryType`, optional `options`, and caller-supplied `outdated` entries with non-empty `originalVersion` and replacement versions | `updated`, the number of entries supplied to the update operation |
 | `cancel` | `id`, the active request to cancel | `cancelled`, whether that request was active |
 
-`registryType` is `npm` or `pub`. Unsupported methods, registry values, dependency types, or selectors return errors. The sidecar update method accepts caller-supplied replacement versions and validates each entry against the current dependency file before applying it; stale locations, original versions, or invalid replacements fail. Its request method, not an option flag, expresses update intent. MCP update instead requires a tracked `checkId` and applies the corresponding stored result.
+`registryType` is `npm` or `pub`. Unsupported methods, registry values, dependency types, or selectors return errors. The sidecar update method accepts caller-supplied replacement versions. Every entry must have a non-empty `originalVersion`; the updater validates its named file, line, and original version against the current file before writing, and rejects stale locations, mismatched versions, or invalid replacements. The sidecar does not prove that an entry came from a prior check. Its request method, not an option flag, expresses update intent. MCP update instead requires a tracked `checkId` and applies the corresponding stored result.
 
 ## Dependency selection
 
@@ -52,7 +52,7 @@ Omitted option flags are false. npm-only peer and workspace options are rejected
 | `log` | `message` |
 | `progress` | `filePath`, `fileCurrent`, `fileTotal`, `current`, `total` |
 
-Check result `outdated` entries carry `name`, `type`, `currentVersion`, `originalVersion`, `latestVersion`, `filePath`, `lineNumber`, and optional `hostedUrl`. A sidecar caller may supply these entries from a check or construct them itself. Update validates the original file location, version, and constraint against the current file before applying the supplied `latestVersion`.
+Check result `outdated` entries carry `name`, `type`, `currentVersion`, `originalVersion`, `latestVersion`, `filePath`, `lineNumber`, and optional `hostedUrl`. A sidecar caller may supply these entries from a check or construct them itself. Update requires a non-empty `originalVersion` and checks each entry against the caller's named file and line before applying its `latestVersion`; it does not establish check provenance.
 
 `semverSkipped` entries carry `name`, `type`, `currentVersion`, `originalVersion`, `latestVersion`, `reason`, and `lineNumber`. Dependency errors carry `name` and `error`; callers must not interpret a failed dependency check as an up-to-date result. Progress reports both the current file and overall dependency-check counters.
 

@@ -356,6 +356,48 @@ func TestServerUpdateEndToEnd(t *testing.T) {
 	}
 }
 
+func TestServerRejectsIncompleteOrStaleUpdateWithoutWriting(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		original      string
+		includeOrigin bool
+		errorContains string
+	}{
+		{name: "omitted originalVersion", errorContains: "originalVersion is required"},
+		{name: "empty originalVersion", original: "", includeOrigin: true, errorContains: "originalVersion is required"},
+		{name: "stale originalVersion", original: "^9.0.0", includeOrigin: true, errorContains: "expected version \"^9.0.0\""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			filePath := filepath.Join(t.TempDir(), "package.json")
+			content := []byte("{\n  \"dependencies\": {\n    \"first\": \"^1.0.0\",\n    \"second\": \"^2.0.0\"\n  }\n}\n")
+			if err := os.WriteFile(filePath, content, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			second := map[string]any{"name": "second", "type": "dependencies", "currentVersion": "2.0.0", "latestVersion": "2.1.0", "filePath": filePath, "lineNumber": 4}
+			if test.includeOrigin {
+				second["originalVersion"] = test.original
+			}
+			messages := runProtocol(t, map[string]any{
+				"method": "update", "id": 11,
+				"params": map[string]any{"filePath": filePath, "registryType": "npm", "options": map[string]any{}, "outdated": []map[string]any{
+					{"name": "first", "type": "dependencies", "currentVersion": "1.0.0", "originalVersion": "^1.0.0", "latestVersion": "1.1.0", "filePath": filePath, "lineNumber": 3},
+					second,
+				}},
+			}, nil)
+			if len(messages) != 1 || messageType(t, messages[0]) != "error" || !strings.Contains(messageError(t, messages[0]), test.errorContains) {
+				t.Fatalf("unexpected messages: %#v", messages)
+			}
+			actual, err := os.ReadFile(filePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(actual, content) {
+				t.Fatalf("update changed file: %s", actual)
+			}
+		})
+	}
+}
+
 func TestServerRejectsUnknownDependencyType(t *testing.T) {
 	messages := runProtocol(t, map[string]any{
 		"method": "update",
@@ -371,6 +413,9 @@ func TestServerRejectsUnknownDependencyType(t *testing.T) {
 	}, nil)
 	if len(messages) != 1 || messageType(t, messages[0]) != "error" {
 		t.Fatalf("unexpected messages: %#v", messages)
+	}
+	if errorMessage := messageError(t, messages[0]); !strings.Contains(errorMessage, "unsupported dependency type") {
+		t.Fatalf("error = %q, want dependency type diagnostic before missing originalVersion", errorMessage)
 	}
 }
 
