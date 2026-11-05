@@ -14,6 +14,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/MilosRandelovic/bump-core/v2/shared"
@@ -545,6 +546,44 @@ func TestCheckOutdatedEndToEndWithNPMRegistry(t *testing.T) {
 	if !strings.Contains(logs.String(), "Checking npm package: example") {
 		t.Fatalf("registry logging was not wired: %q", logs.String())
 	}
+}
+
+func TestCheckOutdatedUsesPersistedCache(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	project := t.TempDir()
+	// An unsupported scheme makes any cache miss fail locally.
+	const registry = "cache-test://npm"
+	synctest.Test(t, func(t *testing.T) {
+		cache, err := shared.NewCacheWithError(shared.CacheConfig{
+			FilePath: filepath.Join(home, ".bump-cache"), CurrentTime: time.Now,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cache.Set(shared.CacheEntry{
+			PackageName: "example", Type: "npm", Registry: registry, Constraint: "*",
+			AbsoluteLatest: "1.2.0", Expiry: time.Now().Add(time.Minute),
+		})
+		if err := cache.SaveEntries(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+
+		dependency := shared.Dependency{
+			BaseDependency: shared.BaseDependency{
+				Name: "example", OriginalVersion: "1.0.0", Type: shared.Dependencies,
+				FilePath: filepath.Join(project, "package.json"), HostedURL: registry,
+			},
+			Version: "1.0.0",
+		}
+		result, err := CheckOutdated(t.Context(), []shared.Dependency{dependency}, shared.NPM, shared.Options{}, project, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Errors) != 0 || len(result.Outdated) != 1 || result.Outdated[0].LatestVersion != "1.2.0" {
+			t.Fatalf("expected persisted version 1.2.0, got %#v", result)
+		}
+	})
 }
 
 func TestUpdateDependenciesValidatesEveryFileBeforeWriting(t *testing.T) {
