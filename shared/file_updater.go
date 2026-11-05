@@ -59,7 +59,7 @@ func PrepareDependenciesInFile(filePath string, outdated []OutdatedDependency, p
 			return nil, fmt.Errorf("invalid line number %d for dependency %s", dependency.LineNumber, dependency.Name)
 		}
 
-		lineIndex := dependency.LineNumber - 1 // Convert to 0-based index
+		lineIndex := dependency.LineNumber - 1
 		line := lines[lineIndex]
 
 		// Get the pattern from the provider

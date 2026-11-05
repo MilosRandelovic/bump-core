@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/MilosRandelovic/bump-core/v2/npm"
@@ -52,8 +53,13 @@ func CheckOutdated(ctx context.Context, dependencies []shared.Dependency, regist
 	// Initialize cache if not disabled
 	var cache *shared.Cache
 	if !options.NoCache {
-		var cacheErr error
-		cache, cacheErr = shared.NewCacheWithError()
+		homeDirectory, cacheErr := os.UserHomeDir()
+		if cacheErr == nil {
+			cache, cacheErr = shared.NewCacheWithError(shared.CacheConfig{
+				FilePath:    filepath.Join(homeDirectory, ".bump-cache"),
+				CurrentTime: time.Now,
+			})
+		}
 		if cacheErr != nil && log != nil {
 			log("Warning: Could not load cache: %v\n", cacheErr)
 		}
@@ -173,7 +179,10 @@ func checkOutdatedWithRegistryClient(ctx context.Context, dependencies []shared.
 	// Save cache if it was used
 	if cache != nil {
 		cache.CleanExpiredEntries()
-		if err := cache.SaveEntries(); err != nil {
+		if err := cache.SaveEntries(ctx); err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return nil, fmt.Errorf("save cache: %w", err)
+			}
 			if log != nil {
 				log("Warning: Could not save cache: %v\n", err)
 			}
@@ -305,7 +314,8 @@ func checkSingleDependency(ctx context.Context, dependency shared.Dependency, re
 			return
 		}
 
-		// If constraint error for hardcoded pre-release, treat as up-to-date
+		// Treat remaining constraint errors as up to date when no newer absolute version was returned.
+		// This includes hardcoded prereleases without a newer eligible release.
 		if errors.Is(err, shared.ErrNoVersionsSatisfyConstraint) {
 			if log != nil {
 				log("No newer versions found for pre-release: %s (%s)\n", dependency.Name, dependency.OriginalVersion)

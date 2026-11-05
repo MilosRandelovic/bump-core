@@ -9,8 +9,8 @@ import (
 	"github.com/Masterminds/semver/v3"
 )
 
-// Version is the single source of truth for the bump version across all repos
-const Version = "2.2.0"
+// Version is the single source of truth for the bump version across all repositories.
+const Version = "2.2.1"
 
 var (
 	versionPrefixCaptureRegex = regexp.MustCompile(`^([\^~>=<]+)`)
@@ -139,7 +139,7 @@ func FindBothLatestVersions(versions []string, constraint string) (absoluteLates
 
 	// Parse versions using semver and build map from semver string to original
 	var collection semver.Collection
-	versionMap := make(map[string]string) // semver string -> original string
+	versionMap := make(map[string]string)
 
 	for _, versionString := range versions {
 		parsedVersion, err := semver.NewVersion(versionString)
@@ -216,9 +216,9 @@ func FindBothLatestVersions(versions []string, constraint string) (absoluteLates
 
 // GetSemverChange classifies an upgrade as major, minor, or patch.
 // Invalid versions, equal versions, and downgrades fall back to PatchChange.
-func GetSemverChange(currentVer, latestVer string) SemverChange {
-	current, currentErr := semver.NewVersion(CleanVersion(currentVer))
-	latest, latestErr := semver.NewVersion(CleanVersion(latestVer))
+func GetSemverChange(currentVersion, latestVersion string) SemverChange {
+	current, currentErr := semver.NewVersion(CleanVersion(currentVersion))
+	latest, latestErr := semver.NewVersion(CleanVersion(latestVersion))
 
 	if currentErr != nil || latestErr != nil {
 		return PatchChange

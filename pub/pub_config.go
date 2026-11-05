@@ -11,7 +11,7 @@ import (
 
 // pubConfig holds configuration for pub registries
 type pubConfig struct {
-	Registries map[string]registryConfig // maps registry hostname to config
+	Registries map[string]registryConfig
 }
 
 // registryConfig holds configuration for a specific registry
@@ -44,15 +44,15 @@ func parsePubConfig(log shared.LogFunc) (*pubConfig, error) {
 
 // parsePubTokensConfig reads authentication tokens from dart pub cache
 func parsePubTokensConfig(config *pubConfig) error {
-	configDir, err := os.UserConfigDir()
+	configDirectory, err := os.UserConfigDir()
 	if err != nil {
 		return fmt.Errorf("failed to resolve user config directory: %w", err)
 	}
 
 	// Check for pub-tokens.json file where dart pub token add stores credentials
-	pubTokensPath := filepath.Join(configDir, "dart", "pub-tokens.json")
+	pubTokensPath := filepath.Join(configDirectory, "dart", "pub-tokens.json")
 	if _, err := os.Stat(pubTokensPath); os.IsNotExist(err) {
-		return nil // File doesn't exist, that's okay
+		return nil
 	}
 
 	return parsePubTokensFile(pubTokensPath, config)

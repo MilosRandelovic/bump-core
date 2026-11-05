@@ -32,12 +32,30 @@ func TestFilterVersionsByMinimumReleaseAge(t *testing.T) {
 
 func TestGenerateCacheKeyUsesOnlyCacheRelevantOptions(t *testing.T) {
 	unfiltered := GenerateCacheKey("example", "npm", "https://registry.npmjs.org", "", "*", Options{})
-	unfilteredVerbose := GenerateCacheKey("example", "npm", "https://registry.npmjs.org", "", "*", Options{Verbose: true})
+	unfilteredSemver := GenerateCacheKey("example", "npm", "https://registry.npmjs.org", "", "*", Options{Semver: true})
 	filtered := GenerateCacheKey("example", "npm", "https://registry.npmjs.org", "", "*", Options{EnforceMinimumReleaseAge: true})
-	if unfiltered != unfilteredVerbose {
+	if unfiltered != unfilteredSemver {
 		t.Fatal("options unrelated to registry results must not change cache keys")
 	}
 	if unfiltered == filtered {
 		t.Fatal("minimum-age and unfiltered cache keys must differ")
+	}
+}
+
+func TestGenerateCacheKeyGoldenVectors(t *testing.T) {
+	tests := []struct {
+		name, packageName, ecosystem, registry, currentVersion, constraint, want string
+		options                                                                  Options
+	}{
+		{"unfiltered", "example", "npm", "https://registry.npmjs.org", "", "*", `["example","npm","https://registry.npmjs.org","","*"]`, Options{}},
+		{"minimum age", "example", "npm", "https://registry.npmjs.org", "", "*", `["example","npm","https://registry.npmjs.org","","*","minimumAge"]`, Options{EnforceMinimumReleaseAge: true}},
+		{"escaped compound", "name|quoted", "npm", "https://registry.example/a|b", "1.0.0", ">=1.0.0 <2.0.0 | \"quoted\"", `["name|quoted","npm","https://registry.example/a|b","1.0.0","\u003e=1.0.0 \u003c2.0.0 | \"quoted\""]`, Options{}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := GenerateCacheKey(test.packageName, test.ecosystem, test.registry, test.currentVersion, test.constraint, test.options); got != test.want {
+				t.Fatalf("GenerateCacheKey() = %q, want %q", got, test.want)
+			}
+		})
 	}
 }

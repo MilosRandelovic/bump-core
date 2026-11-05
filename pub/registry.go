@@ -13,8 +13,11 @@ import (
 	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
 
-// RegistryClient handles pub.dev and private registry operations
+const maxRegistryResponseSize = 64 << 20
+
+// RegistryClient resolves package versions from pub.dev and private Pub registries.
 type RegistryClient struct {
+	// Log receives optional registry and authentication diagnostics.
 	Log         shared.LogFunc
 	currentTime func() time.Time
 	configOnce  sync.Once
@@ -267,10 +270,16 @@ func (client *RegistryClient) fetchPackageInfo(ctx context.Context, packageName 
 	if response.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("registry returned status %d for %s", response.StatusCode, packageName)
 	}
+	if response.ContentLength > maxRegistryResponseSize {
+		return nil, fmt.Errorf("registry response for %s exceeds %d bytes", packageName, maxRegistryResponseSize)
+	}
 
-	body, err := io.ReadAll(response.Body)
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxRegistryResponseSize+1))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+	if len(body) > maxRegistryResponseSize {
+		return nil, fmt.Errorf("registry response for %s exceeds %d bytes", packageName, maxRegistryResponseSize)
 	}
 
 	return body, nil

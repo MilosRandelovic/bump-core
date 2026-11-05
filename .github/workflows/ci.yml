@@ -20,19 +20,19 @@ jobs:
       run: go mod download
 
     - name: Check formatting
-      run: |
-        if [ "$(gofmt -l .)" != "" ]; then
-          echo "The following files are not properly formatted:"
-          gofmt -l .
-          echo "Please run 'gofmt -w .' to fix formatting issues."
-          exit 1
-        fi
+      run: test -z "$(gofmt -l .)"
 
     - name: Run go vet
-      run: go vet -all ./...
+      run: go vet ./...
 
     - name: Run tests
-      run: go test -v ./...
+      run: go test ./...
+
+    - name: Run race detector
+      run: go test -race ./...
 
     - name: Build
       run: make build
+
+    - name: Check version output
+      run: ./bump-core --version

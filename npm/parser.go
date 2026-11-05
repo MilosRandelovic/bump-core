@@ -14,8 +14,9 @@ import (
 	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
 
-// Parser handles npm package.json parsing
+// Parser reads dependencies from npm package.json files.
 type Parser struct {
+	// Log receives optional parsing diagnostics.
 	Log shared.LogFunc
 }
 
@@ -132,7 +133,7 @@ func (parser *Parser) parseManifest(filePath string, data []byte, manifest packa
 								OriginalVersion: versionString,
 								Type:            currentSection,
 								FilePath:        filePath,
-								LineNumber:      lineNumber + 1, // Convert to 1-based
+								LineNumber:      lineNumber + 1,
 							},
 							Version: shared.CleanVersion(versionString),
 						})
@@ -147,7 +148,7 @@ func (parser *Parser) parseManifest(filePath string, data []byte, manifest packa
 }
 
 func (parser *Parser) parseWorkspaces(rootPath string, rootData []byte, rootManifest packageManifest, patterns []string, options shared.Options) ([]shared.Dependency, error) {
-	rootDir := filepath.Dir(rootPath)
+	rootDirectory := filepath.Dir(rootPath)
 	all := []shared.Dependency{}
 
 	root := parser.parseManifest(rootPath, rootData, rootManifest, options)
@@ -159,7 +160,7 @@ func (parser *Parser) parseWorkspaces(rootPath string, rootData []byte, rootMani
 			continue
 		}
 
-		matches, err := filepath.Glob(filepath.Join(rootDir, pattern))
+		matches, err := filepath.Glob(filepath.Join(rootDirectory, pattern))
 		if err != nil {
 			parser.log("Warning: invalid workspace glob pattern %q: %v\n", pattern, err)
 			continue

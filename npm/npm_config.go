@@ -12,12 +12,12 @@ import (
 
 // npmConfig holds the parsed .npmrc configuration
 type npmConfig struct {
-	ScopeRegistries map[string]string // maps scope to registry URL
-	AuthTokens      map[string]string // maps registry to auth token
+	ScopeRegistries map[string]string
+	AuthTokens      map[string]string
 }
 
 // parseNpmrcFiles parses both local and global .npmrc files and merges their configurations
-// Local .npmrc takes precedence for scope registries, global .npmrc provides auth tokens
+// Local .npmrc values take precedence for both scope registries and auth tokens.
 func parseNpmrcFiles(localPath string) (*npmConfig, error) {
 	config := &npmConfig{
 		ScopeRegistries: make(map[string]string),
@@ -25,11 +25,11 @@ func parseNpmrcFiles(localPath string) (*npmConfig, error) {
 	}
 
 	// Parse global .npmrc first (from home directory)
-	homeDir, err := os.UserHomeDir()
+	homeDirectory, err := os.UserHomeDir()
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve home directory: %w", err)
 	}
-	globalNpmrcPath := filepath.Join(homeDir, ".npmrc")
+	globalNpmrcPath := filepath.Join(homeDirectory, ".npmrc")
 	globalConfig, err := parseNpmrcFile(globalNpmrcPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse global .npmrc: %w", err)
@@ -131,7 +131,7 @@ func getRegistryForPackage(packageName string, npmrcConfig *npmConfig) string {
 	// Check if it's a scoped package
 	if strings.HasPrefix(packageName, "@") {
 		if index := strings.Index(packageName[1:], "/"); index != -1 {
-			scope := packageName[:index+1] // Include @ but not the /
+			scope := packageName[:index+1]
 			if registry, exists := npmrcConfig.ScopeRegistries[scope]; exists {
 				return registry
 			}

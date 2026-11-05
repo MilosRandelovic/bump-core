@@ -8,8 +8,9 @@ import (
 	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
 
-// Parser handles Dart pubspec.yaml parsing
+// Parser reads dependencies from Dart pubspec.yaml files.
 type Parser struct {
+	// Log receives optional parsing diagnostics.
 	Log shared.LogFunc
 }
 
@@ -189,13 +190,13 @@ func (info *packageInfo) toDependency(section shared.DependencyType, filePath st
 }
 
 // cleanQuotes removes surrounding quotes from a string
-func cleanQuotes(s string) string {
-	s = strings.TrimSpace(stripInlineComment(s))
-	if (strings.HasPrefix(s, `"`) && strings.HasSuffix(s, `"`)) ||
-		(strings.HasPrefix(s, `'`) && strings.HasSuffix(s, `'`)) {
-		return s[1 : len(s)-1]
+func cleanQuotes(value string) string {
+	value = strings.TrimSpace(stripInlineComment(value))
+	if (strings.HasPrefix(value, `"`) && strings.HasSuffix(value, `"`)) ||
+		(strings.HasPrefix(value, `'`) && strings.HasSuffix(value, `'`)) {
+		return value[1 : len(value)-1]
 	}
-	return s
+	return value
 }
 
 func stripInlineComment(value string) string {

@@ -14,15 +14,19 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
 
 type concurrentLogRegistry struct {
-	active    atomic.Int32
-	maxActive atomic.Int32
-	delays    map[string]time.Duration
+	active             atomic.Int32
+	maxActive          atomic.Int32
+	concurrentStarted  chan struct{}
+	releaseConcurrency sync.Once
+	waitForLater       chan struct{}
+	completed          chan string
 }
 
 func TestValidateOptionsRejectsUnsupportedRegistry(t *testing.T) {
@@ -58,13 +62,28 @@ func (registry *concurrentLogRegistry) GetLatestVersionFromRegistry(ctx context.
 			break
 		}
 	}
-	select {
-	case <-time.After(registry.delays[packageName]):
-	case <-ctx.Done():
-		return "", ctx.Err()
+	if registry.concurrentStarted != nil {
+		if active >= 2 {
+			registry.releaseConcurrency.Do(func() { close(registry.concurrentStarted) })
+		}
+		select {
+		case <-registry.concurrentStarted:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
 	}
 	if log := shared.LogFromContext(ctx); log != nil {
 		log("registry detail: %s\n", packageName)
+	}
+	if packageName == "package-0" && registry.waitForLater != nil {
+		select {
+		case <-registry.waitForLater:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	if registry.completed != nil {
+		registry.completed <- packageName
 	}
 	return "2.0.0", nil
 }
@@ -529,6 +548,44 @@ func TestCheckOutdatedEndToEndWithNPMRegistry(t *testing.T) {
 	}
 }
 
+func TestCheckOutdatedUsesPersistedCache(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	project := t.TempDir()
+	// An unsupported scheme makes any cache miss fail locally.
+	const registry = "cache-test://npm"
+	synctest.Test(t, func(t *testing.T) {
+		cache, err := shared.NewCacheWithError(shared.CacheConfig{
+			FilePath: filepath.Join(home, ".bump-cache"), CurrentTime: time.Now,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		cache.Set(shared.CacheEntry{
+			PackageName: "example", Type: "npm", Registry: registry, Constraint: "*",
+			AbsoluteLatest: "1.2.0", Expiry: time.Now().Add(time.Minute),
+		})
+		if err := cache.SaveEntries(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+
+		dependency := shared.Dependency{
+			BaseDependency: shared.BaseDependency{
+				Name: "example", OriginalVersion: "1.0.0", Type: shared.Dependencies,
+				FilePath: filepath.Join(project, "package.json"), HostedURL: registry,
+			},
+			Version: "1.0.0",
+		}
+		result, err := CheckOutdated(t.Context(), []shared.Dependency{dependency}, shared.NPM, shared.Options{}, project, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Errors) != 0 || len(result.Outdated) != 1 || result.Outdated[0].LatestVersion != "1.2.0" {
+			t.Fatalf("expected persisted version 1.2.0, got %#v", result)
+		}
+	})
+}
+
 func TestUpdateDependenciesValidatesEveryFileBeforeWriting(t *testing.T) {
 	directory := t.TempDir()
 	rootPath := filepath.Join(directory, "package.json")
@@ -630,20 +687,33 @@ func TestUpdateDependenciesHonoursCancellationBeforeWriting(t *testing.T) {
 }
 
 func TestVerboseChecksStayConcurrentAndFlushLogsInDependencyOrder(t *testing.T) {
-	dependencies := make([]shared.Dependency, 6)
-	delays := make(map[string]time.Duration, len(dependencies))
+	dependencies := make([]shared.Dependency, 2)
 	for index := range dependencies {
 		name := fmt.Sprintf("package-%d", index)
 		dependencies[index] = shared.Dependency{
 			BaseDependency: shared.BaseDependency{Name: name, OriginalVersion: "1.0.0", Type: shared.Dependencies, FilePath: "/project/package.json", LineNumber: index + 1},
 			Version:        "1.0.0",
 		}
-		delays[name] = time.Duration(len(dependencies)-index) * 5 * time.Millisecond
 	}
-	registry := &concurrentLogRegistry{delays: delays}
+	registry := &concurrentLogRegistry{concurrentStarted: make(chan struct{}), waitForLater: make(chan struct{}), completed: make(chan string, len(dependencies))}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var completionOrder []string
 	var logs strings.Builder
 	result, err := checkOutdatedWithRegistryClient(
-		context.Background(), dependencies, registry, shared.Options{}, "/project", nil,
+		ctx, dependencies, registry, shared.Options{}, "/project", func(progress shared.Progress) {
+			var name string
+			select {
+			case name = <-registry.completed:
+			case <-ctx.Done():
+				t.Errorf("registry completion for progress %d/%d was not received: %v", progress.Current, progress.Total, ctx.Err())
+				return
+			}
+			completionOrder = append(completionOrder, name)
+			if name == "package-1" {
+				close(registry.waitForLater)
+			}
+		},
 		func(format string, args ...any) { fmt.Fprintf(&logs, format, args...) }, nil,
 	)
 	if err != nil {
@@ -654,6 +724,14 @@ func TestVerboseChecksStayConcurrentAndFlushLogsInDependencyOrder(t *testing.T) 
 	}
 	if registry.maxActive.Load() < 2 {
 		t.Fatalf("maximum concurrent checks = %d", registry.maxActive.Load())
+	}
+	if !reflect.DeepEqual(completionOrder, []string{"package-1", "package-0"}) {
+		t.Fatalf("completion order = %#v", completionOrder)
+	}
+	for index, dependency := range result.Outdated {
+		if dependency.Name != dependencies[index].Name {
+			t.Fatalf("outdated order = %#v", result.Outdated)
+		}
 	}
 	previousPosition := -1
 	for index := range dependencies {
@@ -671,9 +749,7 @@ func TestCheckOutdatedPreservesInputOrderAcrossFiles(t *testing.T) {
 		{BaseDependency: shared.BaseDependency{Name: "second", OriginalVersion: "1.0.0", Type: shared.Dependencies, FilePath: "/project/package.json"}, Version: "1.0.0"},
 		{BaseDependency: shared.BaseDependency{Name: "third", OriginalVersion: "1.0.0", Type: shared.Dependencies, FilePath: "/project/packages/app/package.json"}, Version: "1.0.0"},
 	}
-	registry := &concurrentLogRegistry{delays: map[string]time.Duration{
-		"first": 3 * time.Millisecond, "second": 2 * time.Millisecond, "third": time.Millisecond,
-	}}
+	registry := &concurrentLogRegistry{}
 	var logs strings.Builder
 	var progressUpdates []shared.Progress
 	result, err := checkOutdatedWithRegistryClient(

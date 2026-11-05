@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,12 @@ import (
 )
 
 const maxConcurrentRequests = 8
+
+type incomingRequest struct {
+	Method RequestMethod   `json:"method"`
+	ID     *int            `json:"id"`
+	Params json.RawMessage `json:"params,omitempty"`
+}
 
 type detectDependencyFunc func(
 	directory string,
@@ -99,8 +106,8 @@ func (s *Server) Run() error {
 			continue
 		}
 
-		var request Request
-		if err := json.Unmarshal(line, &request); err != nil {
+		var incoming incomingRequest
+		if err := decodeJSON(line, &incoming); err != nil {
 			s.sendError(0, fmt.Sprintf("invalid JSON: %v", err))
 			if err := s.currentWriteError(); err != nil {
 				s.cancelAllRequests()
@@ -109,6 +116,16 @@ func (s *Server) Run() error {
 			}
 			continue
 		}
+		if incoming.ID == nil {
+			s.sendError(0, "request id is required")
+			if err := s.currentWriteError(); err != nil {
+				s.cancelAllRequests()
+				s.requestWorkers.Wait()
+				return err
+			}
+			continue
+		}
+		request := Request{Method: incoming.Method, ID: *incoming.ID, Params: incoming.Params}
 
 		if request.Method == RequestMethodCancel {
 			if s.isRequestActive(request.ID) {
@@ -184,7 +201,7 @@ func (s *Server) handleRequest(ctx context.Context, request *Request) {
 // handleDetect auto-detects the dependency file and registry type in the given directory.
 func (s *Server) handleDetect(ctx context.Context, request *Request) {
 	var params DetectParams
-	if err := json.Unmarshal(request.Params, &params); err != nil {
+	if err := decodeJSON(request.Params, &params); err != nil {
 		s.sendError(request.ID, fmt.Sprintf("invalid detect params: %v", err))
 		return
 	}
@@ -210,7 +227,7 @@ func (s *Server) handleDetect(ctx context.Context, request *Request) {
 		return
 	}
 
-	s.sendResult(request.ID, &DetectResult{
+	sendResult(s, request.ID, &DetectResult{
 		FilePath:     filePath,
 		RegistryType: registryType.String(),
 	})
@@ -219,7 +236,7 @@ func (s *Server) handleDetect(ctx context.Context, request *Request) {
 // handleCheck parses the dependency file and checks the selected dependencies for available updates.
 func (s *Server) handleCheck(ctx context.Context, request *Request) {
 	var params CheckParams
-	if err := json.Unmarshal(request.Params, &params); err != nil {
+	if err := decodeJSON(request.Params, &params); err != nil {
 		s.sendError(request.ID, fmt.Sprintf("invalid check params: %v", err))
 		return
 	}
@@ -236,7 +253,7 @@ func (s *Server) handleCheck(ctx context.Context, request *Request) {
 
 	options := params.Options.ToOptions()
 	var logFunc shared.LogFunc
-	if options.Verbose {
+	if params.Options.Verbose {
 		logFunc = s.makeLogFunc(request.ID)
 	}
 
@@ -269,13 +286,13 @@ func (s *Server) handleCheck(ctx context.Context, request *Request) {
 		return
 	}
 
-	s.sendResult(request.ID, FromCheckResult(checkResult))
+	sendResult(s, request.ID, FromCheckResult(checkResult))
 }
 
 // handleUpdate writes updated versions for the supplied outdated dependencies back to their files.
 func (s *Server) handleUpdate(ctx context.Context, request *Request) {
 	var params UpdateParams
-	if err := json.Unmarshal(request.Params, &params); err != nil {
+	if err := decodeJSON(request.Params, &params); err != nil {
 		s.sendError(request.ID, fmt.Sprintf("invalid update params: %v", err))
 		return
 	}
@@ -292,7 +309,7 @@ func (s *Server) handleUpdate(ctx context.Context, request *Request) {
 
 	options := params.Options.ToOptions()
 	var logFunc shared.LogFunc
-	if options.Verbose {
+	if params.Options.Verbose {
 		logFunc = s.makeLogFunc(request.ID)
 	}
 	outdated, err := ToOutdatedDependencies(params.Outdated)
@@ -313,7 +330,7 @@ func (s *Server) handleUpdate(ctx context.Context, request *Request) {
 		s.sendError(request.ID, fmt.Sprintf("update error: %v", err))
 		return
 	}
-	s.sendResult(request.ID, &UpdateResult{Updated: len(outdated)})
+	sendResult(s, request.ID, &UpdateResult{Updated: len(outdated)})
 }
 
 // makeLogFunc returns a LogFunc that forwards bump-core log output as protocol log messages.
@@ -325,8 +342,8 @@ func (s *Server) makeLogFunc(id int) shared.LogFunc {
 }
 
 // sendResult encodes a successful response for the given request ID.
-func (s *Server) sendResult(id int, result interface{}) {
-	s.encode(&Response{
+func sendResult[T resultPayload](server *Server, id int, result T) {
+	server.encode(&resultResponse[T]{
 		ID:     id,
 		Type:   "result",
 		Result: result,
@@ -340,7 +357,7 @@ func (s *Server) sendError(id int, errorMessage string) {
 
 // sendCodedError encodes an error response with a stable machine-readable code.
 func (s *Server) sendCodedError(id int, code ErrorCode, errorMessage string) {
-	s.encode(&Response{
+	s.encode(&errorResponse{
 		ID:    id,
 		Type:  "error",
 		Code:  code,
@@ -435,7 +452,7 @@ func (s *Server) cancelAllRequests() {
 
 func (s *Server) handleCancel(request *Request) {
 	var params CancelParams
-	if err := json.Unmarshal(request.Params, &params); err != nil {
+	if err := decodeJSON(request.Params, &params); err != nil {
 		s.sendError(request.ID, fmt.Sprintf("invalid cancel params: %v", err))
 		return
 	}
@@ -443,5 +460,20 @@ func (s *Server) handleCancel(request *Request) {
 		s.sendError(request.ID, "cancel target id is required")
 		return
 	}
-	s.sendResult(request.ID, &CancelResult{Cancelled: s.cancelRequest(*params.ID)})
+	sendResult(s, request.ID, &CancelResult{Cancelled: s.cancelRequest(*params.ID)})
+}
+
+func decodeJSON(data []byte, destination any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(destination); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values")
+		}
+		return err
+	}
+	return nil
 }

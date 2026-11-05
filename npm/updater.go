@@ -7,7 +7,7 @@ import (
 	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
 
-// PatternProvider implements the pattern provider for npm package.json files
+// PatternProvider locates and replaces dependency constraints in package.json files.
 type PatternProvider struct{}
 
 // GetPattern returns a regular expression whose second capture group contains the dependency constraint.
@@ -22,7 +22,7 @@ func (patternProvider *PatternProvider) GetReplacement(dependency shared.Outdate
 	return fmt.Sprintf(`${1}"%s"`, newVersion)
 }
 
-// Updater handles npm package.json updating
+// Updater supplies npm-specific dependency update rules.
 type Updater struct {
 	patternProvider *PatternProvider
 }

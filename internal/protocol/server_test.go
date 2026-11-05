@@ -27,9 +27,13 @@ func runProtocol(t *testing.T, request any, configure func(*Server)) []map[strin
 	if err != nil {
 		t.Fatal(err)
 	}
+	return runProtocolInput(t, string(requestData)+"\n", configure)
+}
 
+func runProtocolInput(t *testing.T, input string, configure func(*Server)) []map[string]json.RawMessage {
+	t.Helper()
 	var output bytes.Buffer
-	server := NewServerWithIO(strings.NewReader(string(requestData)+"\n"), &output)
+	server := NewServerWithIO(strings.NewReader(input), &output)
 	if configure != nil {
 		configure(server)
 	}
@@ -49,6 +53,28 @@ func runProtocol(t *testing.T, request any, configure func(*Server)) []map[strin
 	return messages
 }
 
+func TestServerRejectsTrailingJSON(t *testing.T) {
+	for _, test := range []struct {
+		name, tail, errorContains string
+	}{
+		{"second value", " {}", "multiple JSON values"},
+		{"malformed syntax", " {", "unexpected EOF"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			messages := runProtocolInput(t, `{"method":"detect","id":1,"params":{"directory":"."}}`+test.tail+"\n", nil)
+			if len(messages) != 1 || messageType(t, messages[0]) != "error" {
+				t.Fatalf("unexpected messages: %#v", messages)
+			}
+			if got := string(messages[0]["id"]); got != "0" {
+				t.Fatalf("malformed envelope id = %s, want 0", got)
+			}
+			if errorMessage := messageError(t, messages[0]); !strings.Contains(errorMessage, test.errorContains) {
+				t.Fatalf("error = %q, expected %q", errorMessage, test.errorContains)
+			}
+		})
+	}
+}
+
 func messageType(t *testing.T, message map[string]json.RawMessage) string {
 	t.Helper()
 	var result string
@@ -56,6 +82,109 @@ func messageType(t *testing.T, message map[string]json.RawMessage) string {
 		t.Fatal(err)
 	}
 	return result
+}
+
+func messageError(t *testing.T, message map[string]json.RawMessage) string {
+	t.Helper()
+	var result string
+	if err := json.Unmarshal(message["error"], &result); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func TestServerRejectsInvalidRequestShapes(t *testing.T) {
+	tests := []struct {
+		name           string
+		request        map[string]any
+		errorSubstring string
+	}{
+		{
+			name: "missing request id",
+			request: map[string]any{
+				"method": "detect",
+				"params": map[string]any{"directory": t.TempDir()},
+			},
+			errorSubstring: "request id is required",
+		},
+		{
+			name: "unknown request field",
+			request: map[string]any{
+				"method":     "detect",
+				"id":         1,
+				"params":     map[string]any{"directory": t.TempDir()},
+				"unexpected": true,
+			},
+			errorSubstring: "unknown field",
+		},
+		{
+			name: "unknown parameter field",
+			request: map[string]any{
+				"method": "detect",
+				"id":     1,
+				"params": map[string]any{"directory": t.TempDir(), "unexpected": true},
+			},
+			errorSubstring: "unknown field",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			messages := runProtocol(t, test.request, nil)
+			if len(messages) != 1 || messageType(t, messages[0]) != "error" {
+				t.Fatalf("unexpected messages: %#v", messages)
+			}
+			if test.name == "missing request id" && string(messages[0]["id"]) != "0" {
+				t.Fatalf("missing request id response = %s, want 0", messages[0]["id"])
+			}
+			if errorMessage := messageError(t, messages[0]); !strings.Contains(errorMessage, test.errorSubstring) {
+				t.Fatalf("error = %q, expected it to contain %q", errorMessage, test.errorSubstring)
+			}
+		})
+	}
+}
+
+func TestServerRejectsUnknownCheckUpdateAndCancelParams(t *testing.T) {
+	tests := []struct {
+		name   string
+		method RequestMethod
+		params string
+	}{
+		{"check field", RequestMethodCheck, `{"filePath":"/tmp/package.json","registryType":"npm","unexpected":true}`},
+		{"check options field", RequestMethodCheck, `{"filePath":"/tmp/package.json","registryType":"npm","options":{"unexpected":true}}`},
+		{"check target field", RequestMethodCheck, `{"filePath":"/tmp/package.json","registryType":"npm","targets":[{"name":"example","unexpected":true}]}`},
+		{"update field", RequestMethodUpdate, `{"filePath":"/tmp/package.json","registryType":"npm","outdated":[],"unexpected":true}`},
+		{"update options field", RequestMethodUpdate, `{"filePath":"/tmp/package.json","registryType":"npm","options":{"unexpected":true},"outdated":[]}`},
+		{"update dependency field", RequestMethodUpdate, `{"filePath":"/tmp/package.json","registryType":"npm","outdated":[{"name":"example","type":"dependencies","unexpected":true}]}`},
+		{"cancel field", RequestMethodCancel, `{"id":99,"unexpected":true}`},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			input := fmt.Sprintf(`{"method":%q,"id":1,"params":%s}`+"\n", test.method, test.params)
+			messages := runProtocolInput(t, input, nil)
+			if len(messages) != 1 || messageType(t, messages[0]) != "error" || !strings.Contains(messageError(t, messages[0]), "unknown field") {
+				t.Fatalf("unexpected messages: %#v", messages)
+			}
+		})
+	}
+}
+
+func TestServerAcceptsCompatibilityUpdateOption(t *testing.T) {
+	messages := runProtocol(t, map[string]any{
+		"method": "update", "id": 1,
+		"params": map[string]any{
+			"filePath": "/tmp/package.json", "registryType": "npm",
+			"options": map[string]any{"update": true}, "outdated": []any{},
+		},
+	}, func(server *Server) {
+		server.updateDependencies = func(ctx context.Context, filePath string, outdated []shared.OutdatedDependency, registryType shared.RegistryType, options shared.Options, workingDirectory string, log shared.LogFunc) error {
+			return nil
+		}
+	})
+	if len(messages) != 1 || messageType(t, messages[0]) != "result" {
+		t.Fatalf("unexpected messages: %#v", messages)
+	}
 }
 
 func TestServerDetect(t *testing.T) {
@@ -140,6 +269,14 @@ func TestServerCheckWiresVerboseLogsAndGlobalProgress(t *testing.T) {
 	if progressMessage.FilePath != filePath || progressMessage.FileCurrent != 1 || progressMessage.FileTotal != 1 || progressMessage.Current != 1 || progressMessage.Total != 1 {
 		t.Fatalf("unexpected progress message: %#v", progressMessage)
 	}
+	var checkResult CheckResult
+	if err := json.Unmarshal(messages[3]["result"], &checkResult); err != nil {
+		t.Fatal(err)
+	}
+	expectedOutdated := OutdatedDependencyInfo{Name: "example", Type: "dependencies", CurrentVersion: "1.0.0", OriginalVersion: "^1.0.0", LatestVersion: "1.1.0", FilePath: filePath, LineNumber: 3}
+	if len(checkResult.Outdated) != 1 || checkResult.Outdated[0] != expectedOutdated || checkResult.SemverSkipped == nil || len(checkResult.SemverSkipped) != 0 || checkResult.Errors == nil || len(checkResult.Errors) != 0 {
+		t.Fatalf("unexpected check result: %#v", checkResult)
+	}
 }
 
 func TestServerCheckFiltersTargets(t *testing.T) {
@@ -202,6 +339,13 @@ func TestServerUpdateEndToEnd(t *testing.T) {
 	if len(messages) != 1 || messageType(t, messages[0]) != "result" {
 		t.Fatalf("unexpected messages: %#v", messages)
 	}
+	var updateResult UpdateResult
+	if err := json.Unmarshal(messages[0]["result"], &updateResult); err != nil {
+		t.Fatal(err)
+	}
+	if updateResult.Updated != 1 {
+		t.Fatalf("updated count = %d, want 1", updateResult.Updated)
+	}
 
 	updated, err := os.ReadFile(filePath)
 	if err != nil {
@@ -209,6 +353,48 @@ func TestServerUpdateEndToEnd(t *testing.T) {
 	}
 	if !strings.Contains(string(updated), `"example": "^1.2.0"`) {
 		t.Fatalf("dependency was not updated: %s", updated)
+	}
+}
+
+func TestServerRejectsIncompleteOrStaleUpdateWithoutWriting(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		original      string
+		includeOrigin bool
+		errorContains string
+	}{
+		{name: "omitted originalVersion", errorContains: "originalVersion is required"},
+		{name: "empty originalVersion", original: "", includeOrigin: true, errorContains: "originalVersion is required"},
+		{name: "stale originalVersion", original: "^9.0.0", includeOrigin: true, errorContains: "expected version \"^9.0.0\""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			filePath := filepath.Join(t.TempDir(), "package.json")
+			content := []byte("{\n  \"dependencies\": {\n    \"first\": \"^1.0.0\",\n    \"second\": \"^2.0.0\"\n  }\n}\n")
+			if err := os.WriteFile(filePath, content, 0o640); err != nil {
+				t.Fatal(err)
+			}
+			second := map[string]any{"name": "second", "type": "dependencies", "currentVersion": "2.0.0", "latestVersion": "2.1.0", "filePath": filePath, "lineNumber": 4}
+			if test.includeOrigin {
+				second["originalVersion"] = test.original
+			}
+			messages := runProtocol(t, map[string]any{
+				"method": "update", "id": 11,
+				"params": map[string]any{"filePath": filePath, "registryType": "npm", "options": map[string]any{}, "outdated": []map[string]any{
+					{"name": "first", "type": "dependencies", "currentVersion": "1.0.0", "originalVersion": "^1.0.0", "latestVersion": "1.1.0", "filePath": filePath, "lineNumber": 3},
+					second,
+				}},
+			}, nil)
+			if len(messages) != 1 || messageType(t, messages[0]) != "error" || !strings.Contains(messageError(t, messages[0]), test.errorContains) {
+				t.Fatalf("unexpected messages: %#v", messages)
+			}
+			actual, err := os.ReadFile(filePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(actual, content) {
+				t.Fatalf("update changed file: %s", actual)
+			}
+		})
 	}
 }
 
@@ -228,12 +414,17 @@ func TestServerRejectsUnknownDependencyType(t *testing.T) {
 	if len(messages) != 1 || messageType(t, messages[0]) != "error" {
 		t.Fatalf("unexpected messages: %#v", messages)
 	}
+	if errorMessage := messageError(t, messages[0]); !strings.Contains(errorMessage, "unsupported dependency type") {
+		t.Fatalf("error = %q, want dependency type diagnostic before missing originalVersion", errorMessage)
+	}
 }
 
 func TestServerReturnsOutputErrors(t *testing.T) {
-	server := NewServerWithIO(strings.NewReader("not-json\n"), failingWriter{})
-	if err := server.Run(); err == nil || !strings.Contains(err.Error(), "write failed") {
-		t.Fatalf("Run() error = %v, expected output failure", err)
+	for _, input := range []string{"not-json\n", `{"method":"detect","params":{}}` + "\n"} {
+		server := NewServerWithIO(strings.NewReader(input), failingWriter{})
+		if err := server.Run(); err == nil || !strings.Contains(err.Error(), "write failed") {
+			t.Fatalf("Run() with input %q error = %v, expected output failure", input, err)
+		}
 	}
 }
 

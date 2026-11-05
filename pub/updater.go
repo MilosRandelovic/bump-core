@@ -7,7 +7,7 @@ import (
 	"github.com/MilosRandelovic/bump-core/v2/shared"
 )
 
-// PatternProvider implements the pattern provider for pub pubspec.yaml files
+// PatternProvider locates and replaces dependency constraints in pubspec.yaml files.
 type PatternProvider struct{}
 
 // GetPattern returns a regular expression whose second capture group contains the dependency constraint.
@@ -29,7 +29,7 @@ func (patternProvider *PatternProvider) GetReplacement(dependency shared.Outdate
 	return fmt.Sprintf(`${1}%s${3}${4}`, newVersion)
 }
 
-// Updater handles Dart pubspec.yaml updating
+// Updater supplies Pub-specific dependency update rules.
 type Updater struct {
 	patternProvider *PatternProvider
 }

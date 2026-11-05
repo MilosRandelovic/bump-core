@@ -28,16 +28,16 @@ func AutoDetectDependencyFile(directory string, log shared.LogFunc) (string, sha
 	}
 
 	// Check for pubspec.yaml
-	pubspecYaml := filepath.Join(directory, "pubspec.yaml")
-	if _, err := os.Stat(pubspecYaml); err == nil {
-		relativePath, err := filepath.Rel(directory, pubspecYaml)
+	pubspecYAML := filepath.Join(directory, "pubspec.yaml")
+	if _, err := os.Stat(pubspecYAML); err == nil {
+		relativePath, err := filepath.Rel(directory, pubspecYAML)
 		if err != nil {
-			relativePath = pubspecYaml
+			relativePath = pubspecYAML
 		}
 		if log != nil {
 			log("Found pub file: %s\n", relativePath)
 		}
-		return pubspecYaml, shared.Pub, nil
+		return pubspecYAML, shared.Pub, nil
 	} else if !os.IsNotExist(err) {
 		return "", 0, fmt.Errorf("failed to inspect pubspec.yaml: %w", err)
 	}
