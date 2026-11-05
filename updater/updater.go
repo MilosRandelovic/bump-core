@@ -314,7 +314,8 @@ func checkSingleDependency(ctx context.Context, dependency shared.Dependency, re
 			return
 		}
 
-		// If constraint error for hardcoded pre-release, treat as up-to-date
+		// Treat remaining constraint errors as up to date when no newer absolute version was returned.
+		// This includes hardcoded prereleases without a newer eligible release.
 		if errors.Is(err, shared.ErrNoVersionsSatisfyConstraint) {
 			if log != nil {
 				log("No newer versions found for pre-release: %s (%s)\n", dependency.Name, dependency.OriginalVersion)

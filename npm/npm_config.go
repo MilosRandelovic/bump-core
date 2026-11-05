@@ -17,7 +17,7 @@ type npmConfig struct {
 }
 
 // parseNpmrcFiles parses both local and global .npmrc files and merges their configurations
-// Local .npmrc takes precedence for scope registries, global .npmrc provides auth tokens
+// Local .npmrc values take precedence for both scope registries and auth tokens.
 func parseNpmrcFiles(localPath string) (*npmConfig, error) {
 	config := &npmConfig{
 		ScopeRegistries: make(map[string]string),
