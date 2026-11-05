@@ -40,7 +40,7 @@ Library packages never print. Optional diagnostics use `shared.LogFunc`; the sid
 - Registry clients cap response bodies before decoding and never contact a live registry from tests.
 - The persistent cache is versioned strict JSON at `~/.bump-cache`. Cache keys are structured JSON, never delimiter-composed strings, and include package name, ecosystem, registry, current-version dimension, constraint, and minimum-age policy when enabled. Registry clients leave the current-version dimension empty because their lookup results do not depend on the installed version. Minimum-age results expire when the next release becomes eligible if that occurs before the normal expiry.
 - Cache construction requires an explicit `CacheConfig` path and clock. The updater supplies the user's cache location and production clock; persistence tests use the same constructor with a temporary path and fixed clock so they cannot inherit real time or the user's cache.
-- Cache eviction is expiry-based, without an additional byte or entry-count budget: it stores only registry version metadata, not package archives, and each save removes lookups older than the ten-minute lifetime. Retention follows the recent dependency workload rather than accumulating historical packages. This is deliberate for a short-lived local CLI; a cardinality cap would evict still-useful workspace lookups and force additional registry calls. An idle cache file remains on disk until the next save.
+- Each check loads a cache for that request, including in long-running sidecar and MCP sessions. Saves prune expired lookups. The ten-minute expiry limits retention time across processes, while peak entries depend on the distinct lookups in that window. We accept that workload-dependent size to retain reusable results. An idle cache file is pruned on the next save.
 - Cache saves take process-local and operating-system locks, observe request cancellation while waiting for the operating-system lock, reload and merge the current file, remove expired entries, and atomically replace it with mode `0600`. Unsupported cache versions fail without being overwritten; other invalid cache data may be replaced by fresh results.
 - `updater.UpdateDependencies` locks canonical target paths across goroutines and processes for the complete prepare/apply transaction and acquires multi-file locks in deterministic order.
 - Prepare and validate every target before writing the first file. Validate the source location, original and replacement versions, and resulting constraint; changed input fails safely.
@@ -64,9 +64,9 @@ Keep MCP version policy and target selection identical to the sidecar. Forward t
 
 `shared.Version` is the release source of truth. Every version needs an exact `## [x.y.z]` section in `CHANGELOG.md` before merge, and major versions must follow Go module import-path rules.
 
-The release workflow runs on pushes to `main` and does not repeat formatting, vet, or tests because required, up-to-date PR CI has already checked the merged tree. It builds the sidecar to read its version, rejects an existing tag, creates the tag and GitHub source release, and opens a dependency-update pull request in `homebrew-bump`. Workflow actions use their latest supported major tags.
+Required, up-to-date PR CI owns formatting, vet, and tests. The release workflow rejects an existing tag. Workflow actions use their latest supported major tags.
 
-Before removing public API used by the CLI, merge a frontend preparation that compiles with both the released and upcoming core APIs into `homebrew-bump`: the core release workflow checks out and builds that repository's `main`. The Homebrew formula builds `bump-mcp` from the released module version, so the generated dependency-pin update follows the core release, not that compatibility preparation.
+Follow the [release order](README.md#release) when changing public APIs used by the CLI.
 
 Validate workflow edits locally with `make workflow-lint`; Actionlint is intentionally not part of CI because CI should validate the product rather than validate its own workflow syntax.
 
