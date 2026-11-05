@@ -231,6 +231,7 @@ func TestCacheRejectsInvalidJSONShapes(t *testing.T) {
 		errorContains string
 	}{
 		{name: "unknown field", data: `{"version":1,"entries":[],"unexpected":true}`, errorContains: `unknown field "unexpected"`},
+		{name: "unknown entry field", data: `{"version":1,"entries":[{"packageName":"example","expiryy":"2026-01-01T00:00:00Z"}]}`, errorContains: `unknown field "expiryy"`},
 		{name: "trailing value", data: `{"version":1,"entries":[]} {}`, errorContains: "multiple JSON values"},
 		{name: "malformed trailing syntax", data: `{"version":1,"entries":[]} {`, errorContains: "unexpected EOF"},
 	}

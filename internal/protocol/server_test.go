@@ -65,6 +65,9 @@ func TestServerRejectsTrailingJSON(t *testing.T) {
 			if len(messages) != 1 || messageType(t, messages[0]) != "error" {
 				t.Fatalf("unexpected messages: %#v", messages)
 			}
+			if got := string(messages[0]["id"]); got != "0" {
+				t.Fatalf("malformed envelope id = %s, want 0", got)
+			}
 			if errorMessage := messageError(t, messages[0]); !strings.Contains(errorMessage, test.errorContains) {
 				t.Fatalf("error = %q, expected %q", errorMessage, test.errorContains)
 			}
@@ -130,6 +133,9 @@ func TestServerRejectsInvalidRequestShapes(t *testing.T) {
 			messages := runProtocol(t, test.request, nil)
 			if len(messages) != 1 || messageType(t, messages[0]) != "error" {
 				t.Fatalf("unexpected messages: %#v", messages)
+			}
+			if test.name == "missing request id" && string(messages[0]["id"]) != "0" {
+				t.Fatalf("missing request id response = %s, want 0", messages[0]["id"])
 			}
 			if errorMessage := messageError(t, messages[0]); !strings.Contains(errorMessage, test.errorSubstring) {
 				t.Fatalf("error = %q, expected it to contain %q", errorMessage, test.errorSubstring)

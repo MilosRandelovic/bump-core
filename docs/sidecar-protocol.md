@@ -20,10 +20,10 @@ Every request has a `method`, an integer `id`, and method-specific `params`. IDs
 | --- | --- | --- |
 | `detect` | Non-empty `directory` | `filePath` and `registryType` |
 | `check` | Non-empty `filePath`, `registryType`, optional `options` and `targets` | `outdated`, `semverSkipped`, and `errors` arrays |
-| `update` | Non-empty `filePath`, `registryType`, optional `options`, and `outdated` entries from a check | `updated`, the number of entries supplied to the update operation |
+| `update` | Non-empty `filePath`, `registryType`, optional `options`, and caller-supplied `outdated` entries with replacement versions | `updated`, the number of entries supplied to the update operation |
 | `cancel` | `id`, the active request to cancel | `cancelled`, whether that request was active |
 
-`registryType` is `npm` or `pub`. Unsupported methods, registry values, dependency types, or selectors return errors. The update method applies checked replacement versions; its request method, not an option flag, expresses update intent. Dependency-file validation and replacement guarantees are defined by the [update safety invariants](../AGENTS.md#safety-invariants).
+`registryType` is `npm` or `pub`. Unsupported methods, registry values, dependency types, or selectors return errors. The sidecar update method accepts caller-supplied replacement versions and validates each entry against the current dependency file before applying it; stale locations, original versions, or invalid replacements fail. Its request method, not an option flag, expresses update intent. MCP update instead requires a tracked `checkId` and applies the corresponding stored result.
 
 ## Dependency selection
 
@@ -52,7 +52,7 @@ Omitted option flags are false. npm-only peer and workspace options are rejected
 | `log` | `message` |
 | `progress` | `filePath`, `fileCurrent`, `fileTotal`, `current`, `total` |
 
-Check result `outdated` entries carry `name`, `type`, `currentVersion`, `originalVersion`, `latestVersion`, `filePath`, `lineNumber`, and optional `hostedUrl`. Updates send those entries back unchanged, using the original file location and constraint for stale-input validation.
+Check result `outdated` entries carry `name`, `type`, `currentVersion`, `originalVersion`, `latestVersion`, `filePath`, `lineNumber`, and optional `hostedUrl`. A sidecar caller may supply these entries from a check or construct them itself. Update validates the original file location, version, and constraint against the current file before applying the supplied `latestVersion`.
 
 `semverSkipped` entries carry `name`, `type`, `currentVersion`, `originalVersion`, `latestVersion`, `reason`, and `lineNumber`. Dependency errors carry `name` and `error`; callers must not interpret a failed dependency check as an up-to-date result. Progress reports both the current file and overall dependency-check counters.
 
@@ -64,4 +64,4 @@ Regular requests may finish out of order and are limited to eight active workers
 {"type":"error","id":9,"code":"request_limit_exceeded","error":"too many active requests (maximum 8)"}
 ```
 
-Cancel signals cooperative cancellation, not rollback or a promise that the target has finished. The target emits its own correlated result or error. Request workers are owned and awaited by the server; output encoding serializes concurrent responses and events so their JSON lines cannot interleave. On normal input EOF the server drains active workers before returning. Input read failures cancel active work before waiting for it; output failures are recorded and surfaced by the server's run loop.
+Cancel signals cooperative cancellation, not rollback or a promise that the target has finished. Workers check cancellation before starting registry work and before dependency-update prepare and apply operations. The target emits its own correlated result or error. Request workers are owned and awaited by the server; output encoding serializes concurrent responses and events so their JSON lines cannot interleave. On normal input EOF the server drains active workers before returning. Input read failures cancel active work before waiting for it; output failures are recorded and surfaced by the server's run loop.

@@ -702,7 +702,13 @@ func TestVerboseChecksStayConcurrentAndFlushLogsInDependencyOrder(t *testing.T) 
 	var logs strings.Builder
 	result, err := checkOutdatedWithRegistryClient(
 		ctx, dependencies, registry, shared.Options{}, "/project", func(progress shared.Progress) {
-			name := <-registry.completed
+			var name string
+			select {
+			case name = <-registry.completed:
+			case <-ctx.Done():
+				t.Errorf("registry completion for progress %d/%d was not received: %v", progress.Current, progress.Total, ctx.Err())
+				return
+			}
 			completionOrder = append(completionOrder, name)
 			if name == "package-1" {
 				close(registry.waitForLater)
