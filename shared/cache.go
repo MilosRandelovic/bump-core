@@ -188,6 +188,7 @@ func (c *Cache) SaveEntries(ctx context.Context) error {
 		return fmt.Errorf("save cache: %w", err)
 	}
 
+	// Reloading under the persistence lock prevents concurrent cache instances from overwriting one another's entries.
 	mergedEntries := make(map[string]CacheEntry, len(c.entries))
 	if data, err := os.ReadFile(c.filePath); err == nil {
 		diskEntries, decodeErr := decodeCacheEntries(data)

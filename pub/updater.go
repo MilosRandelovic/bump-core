@@ -15,6 +15,8 @@ func (patternProvider *PatternProvider) GetPattern(dependency shared.OutdatedDep
 	// Group 2 must contain only the constraint because shared update validation
 	// compares it with OriginalVersion. Groups 1, 3, and 4 preserve the quote
 	// style, trailing whitespace, and inline comment respectively.
+	// For hosted packages, match the version line
+	// For simple packages, match the package name line
 	if dependency.HostedURL != "" {
 		return `(\s*version\s*:\s*["']?)([^"'#]*[^"'#\s])(["']?)(\s*(?:#.*)?)$`
 	}
@@ -49,13 +51,16 @@ func (updater *Updater) GetPatternProvider() shared.PatternProvider {
 
 // ValidateOptions rejects npm-only peer-dependency and monorepo options.
 func (updater *Updater) ValidateOptions(options shared.Options) error {
+	// Pub ecosystem doesn't support peer dependencies
 	if options.IncludePeerDependencies {
 		return fmt.Errorf("peer dependencies are not supported by pub")
 	}
+	// Monorepo mode is an npm-only concept
 	if options.Monorepo {
 		return fmt.Errorf("monorepo mode is only supported for npm projects")
 	}
 	return nil
 }
 
+// Ensure Updater implements the interface
 var _ shared.Updater = (*Updater)(nil)

@@ -541,6 +541,7 @@ func TestCacheExpiredCleanup(t *testing.T) {
 	// Create cache without auto-loading
 	cache := newTestCache(t, cachePath)
 
+	// Use fixed timestamps to avoid timing issues
 	now := cacheTestTime
 	pastTime := now.Add(-24 * time.Hour)  // Clearly expired
 	futureTime := now.Add(24 * time.Hour) // Clearly valid

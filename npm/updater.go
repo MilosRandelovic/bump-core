@@ -12,6 +12,7 @@ type PatternProvider struct{}
 
 // GetPattern returns a regular expression whose second capture group contains the dependency constraint.
 func (patternProvider *PatternProvider) GetPattern(dependency shared.OutdatedDependency) string {
+	// Look for: "package-name": "old-version"
 	escapedName := regexp.QuoteMeta(dependency.Name)
 	return fmt.Sprintf(`("%s"\s*:\s*)"([^"]*)"`, escapedName)
 }
@@ -43,7 +44,9 @@ func (updater *Updater) GetPatternProvider() shared.PatternProvider {
 
 // ValidateOptions accepts all currently defined update options for npm.
 func (updater *Updater) ValidateOptions(options shared.Options) error {
+	// npm has no special option requirements
 	return nil
 }
 
+// Ensure Updater implements the interface
 var _ shared.Updater = (*Updater)(nil)

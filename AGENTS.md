@@ -30,7 +30,7 @@ Library packages never print. Optional diagnostics use `shared.LogFunc`; the sid
 - Functions that accept dependency behavior take `shared.Options`; frontend-only behavior such as CLI output and sidecar verbosity stays in the frontend.
 - Name every callable parameter, including function types and callbacks. Keep conventional abbreviations such as `ctx`, `err`, `ok`, `id`, `max`, `min`, `args`, `config`, and `info`; expand names whose meaning is not immediate in their scope.
 - Put `context.Context` first on registry checks, update operations, and transport lifecycles, and propagate cancellation through HTTP requests and owned goroutines.
-- Keep public API comments useful as contracts. Comments elsewhere explain safety, ordering, external constraints, or behavior the code cannot express; they do not narrate statements or record changes.
+- Keep public API comments useful as contracts. New comments explain safety, ordering, external constraints, or behavior the code cannot express; they do not narrate statements or record changes. Preserve existing comments during cleanup because they carry the author's context; update them when the associated behavior changes, and remove them only with the code they describe.
 - Wrap operational errors with lower-case context and `%w` so callers can classify the cause.
 - Constraint mismatches belong in `SemverSkipped`, not `Errors`.
 

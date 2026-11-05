@@ -184,6 +184,7 @@ func (s *Server) releaseRequestSlot() {
 	<-s.requestSlots
 }
 
+// handleRequest routes the request to the appropriate method handler.
 func (s *Server) handleRequest(ctx context.Context, request *Request) {
 	switch request.Method {
 	case RequestMethodDetect:
@@ -197,6 +198,7 @@ func (s *Server) handleRequest(ctx context.Context, request *Request) {
 	}
 }
 
+// handleDetect auto-detects the dependency file and registry type in the given directory.
 func (s *Server) handleDetect(ctx context.Context, request *Request) {
 	var params DetectParams
 	if err := decodeJSON(request.Params, &params); err != nil {
@@ -231,6 +233,7 @@ func (s *Server) handleDetect(ctx context.Context, request *Request) {
 	})
 }
 
+// handleCheck parses the dependency file and checks the selected dependencies for available updates.
 func (s *Server) handleCheck(ctx context.Context, request *Request) {
 	var params CheckParams
 	if err := decodeJSON(request.Params, &params); err != nil {
@@ -286,6 +289,7 @@ func (s *Server) handleCheck(ctx context.Context, request *Request) {
 	sendResult(s, request.ID, FromCheckResult(checkResult))
 }
 
+// handleUpdate writes updated versions for the supplied outdated dependencies back to their files.
 func (s *Server) handleUpdate(ctx context.Context, request *Request) {
 	var params UpdateParams
 	if err := decodeJSON(request.Params, &params); err != nil {
@@ -329,6 +333,7 @@ func (s *Server) handleUpdate(ctx context.Context, request *Request) {
 	sendResult(s, request.ID, &UpdateResult{Updated: len(outdated)})
 }
 
+// makeLogFunc returns a LogFunc that forwards bump-core log output as protocol log messages.
 func (s *Server) makeLogFunc(id int) shared.LogFunc {
 	return func(format string, args ...any) {
 		message := fmt.Sprintf(format, args...)
@@ -336,6 +341,7 @@ func (s *Server) makeLogFunc(id int) shared.LogFunc {
 	}
 }
 
+// sendResult encodes a successful response for the given request ID.
 func sendResult[T resultPayload](server *Server, id int, result T) {
 	server.encode(&resultResponse[T]{
 		ID:     id,
@@ -344,10 +350,12 @@ func sendResult[T resultPayload](server *Server, id int, result T) {
 	})
 }
 
+// sendError encodes an error response for the given request ID.
 func (s *Server) sendError(id int, errorMessage string) {
 	s.sendCodedError(id, "", errorMessage)
 }
 
+// sendCodedError encodes an error response with a stable machine-readable code.
 func (s *Server) sendCodedError(id int, code ErrorCode, errorMessage string) {
 	s.encode(&errorResponse{
 		ID:    id,
@@ -357,6 +365,7 @@ func (s *Server) sendCodedError(id int, code ErrorCode, errorMessage string) {
 	})
 }
 
+// sendLog encodes a log message tied to a request ID.
 func (s *Server) sendLog(id int, message string) {
 	s.encode(&LogMessage{
 		Type:    "log",
@@ -365,6 +374,7 @@ func (s *Server) sendLog(id int, message string) {
 	})
 }
 
+// sendProgress encodes a progress update tied to a request ID.
 func (s *Server) sendProgress(id int, progress shared.Progress) {
 	s.encode(&ProgressMessage{
 		Type:        "progress",

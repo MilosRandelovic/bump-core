@@ -75,15 +75,18 @@ func (parser *Parser) parseFile(filePath string, data []byte, options shared.Opt
 }
 
 func (parser *Parser) parseManifest(filePath string, data []byte, manifest packageManifest, options shared.Options) []shared.Dependency {
+	// Parse line by line to track line numbers and extract dependencies
 	lines := strings.Split(string(data), "\n")
 	var dependencies []shared.Dependency
 
+	// Track which section we're in
 	var currentSection shared.DependencyType
 	var inSection bool
 
 	for lineNumber, line := range lines {
 		trimmedLine := strings.TrimSpace(line)
 
+		// Check if we're entering a dependency section
 		if strings.Contains(trimmedLine, `"dependencies"`) && strings.Contains(trimmedLine, `:`) {
 			currentSection = shared.Dependencies
 			inSection = true
@@ -100,22 +103,29 @@ func (parser *Parser) parseManifest(filePath string, data []byte, manifest packa
 			continue
 		}
 
+		// Check if we're leaving a section (closing brace or comma)
 		if inSection && (trimmedLine == "}" || trimmedLine == "},") {
 			inSection = false
 			continue
 		}
 
+		// If we're in a section, look for dependency definitions
 		if inSection {
+			// Look for lines like: "package-name": "version",
 			if strings.Contains(trimmedLine, `"`) && strings.Contains(trimmedLine, `:`) {
+				// Parse the dependency name and version
 				parts := strings.SplitN(trimmedLine, ":", 2)
 				if len(parts) == 2 {
+					// Extract package name (remove quotes and whitespace)
 					nameString := strings.TrimSpace(parts[0])
 					nameString = strings.Trim(nameString, `"`)
 
+					// Extract version (remove quotes, whitespace, and trailing comma)
 					versionString := strings.TrimSpace(parts[1])
 					versionString = strings.Trim(versionString, `",`)
 					versionString = strings.Trim(versionString, `"`)
 
+					// Basic validation - skip empty names or versions
 					if nameString != "" && versionString != "" {
 						dependencies = append(dependencies, shared.Dependency{
 							BaseDependency: shared.BaseDependency{
@@ -299,4 +309,5 @@ func extractWorkspacePatterns(workspacesRaw json.RawMessage) ([]string, error) {
 	return nil, fmt.Errorf("expected an array of strings or object with packages field")
 }
 
+// Ensure Parser implements the interface
 var _ shared.Parser = (*Parser)(nil)

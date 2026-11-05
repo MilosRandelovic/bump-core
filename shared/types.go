@@ -148,6 +148,7 @@ type ProgressFunc func(progress Progress)
 // LogFunc receives optional diagnostic output.
 type LogFunc func(format string, args ...any)
 
+// Custom error types for better error handling
 var (
 	// ErrNoVersionsSatisfyConstraint indicates that no versions match the given semver constraint.
 	ErrNoVersionsSatisfyConstraint = errors.New("no versions satisfy the constraint")
